@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Facebook OAuth Callback</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 600px;
+            width: 90%;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #1877F2;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            color: #d32f2f;
+            margin-top: 20px;
+        }
+        .success {
+            color: #2e7d32;
+            margin-top: 20px;
+        }
+        .success-icon {
+            color: #2e7d32;
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .back-button {
+            background-color: #1877F2;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background-color 0.3s;
+        }
+        .back-button:hover {
+            background-color: #1565C0;
+        }
+        .back-button:active {
+            background-color: #0D47A1;
+        }
+        .back-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .details {
+            background-color: #f5f5f5;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: left;
+            font-size: 14px;
+        }
+        .details-item {
+            margin: 8px 0;
+        }
+        .details-label {
+            font-weight: 600;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="spinner" class="spinner"></div>
+        <h3 id="title">Processing Facebook authorization...</h3>
+        <p id="message">Please wait while we process the Facebook authorization.</p>
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="success" class="success" style="display: none;"></div>
+        <div id="details" class="details" style="display: none;"></div>
+        <button id="backButton" class="back-button" style="display: none;" onclick="window.location.href='/#/configuracoes/meta'">
+            Back to Settings
+        </button>
+    </div>
+
+    <script>
+        (function() {
+            // Capturar parâmetros da URL (query string)
+            const urlParams = new URLSearchParams(window.location.search);
+            const error = urlParams.get('error');
+            const error_reason = urlParams.get('error_reason');
+            const error_description = urlParams.get('error_description');
+            
+            // Parâmetros para configurar o fluxo
+            const clientId = urlParams.get('client_id');
+            const tenantId = urlParams.get('tenantId');
+            const metaToken = urlParams.get('metaToken');
+
+            // Capturar parâmetros do hash (#) - Facebook OAuth usa implicit flow (response_type=token)
+            // O token vem no hash como: #access_token=...&expires_in=...&token_type=...
+            let accessToken = null;
+            let expiresIn = null;
+            let tokenType = null;
+            
+            if (window.location.hash) {
+                const hashParams = new URLSearchParams(window.location.hash.substring(1));
+                accessToken = hashParams.get('access_token');
+                expiresIn = hashParams.get('expires_in');
+                tokenType = hashParams.get('token_type');
+                
+                // Verificar se há erro no hash
+                if (!accessToken && hashParams.get('error')) {
+                    const hashError = hashParams.get('error');
+                    const hashErrorReason = hashParams.get('error_reason');
+                    const hashErrorDescription = hashParams.get('error_description');
+                    
+                    console.error('=== FACEBOOK OAUTH ERROR (from hash) ===');
+                    console.error('Error:', hashError);
+                    console.error('Error Reason:', hashErrorReason);
+                    console.error('Error Description:', hashErrorDescription);
+                    
+                    const errorDiv = document.getElementById('error');
+                    const title = document.getElementById('title');
+                    const message = document.getElementById('message');
+                    const spinner = document.getElementById('spinner');
+                    const backButton = document.getElementById('backButton');
+                    
+                    if (spinner) spinner.style.display = 'none';
+                    if (title) {
+                        title.textContent = 'Authorization Error';
+                        title.style.color = '#d32f2f';
+                    }
+                    if (errorDiv) {
+                        errorDiv.innerHTML = `
+                            <strong>Error:</strong> ${hashError || 'Unknown error'}<br>
+                            ${hashErrorDescription ? `<br>${hashErrorDescription}` : ''}
+                        `;
+                        errorDiv.style.display = 'block';
+                    }
+                    if (backButton) backButton.style.display = 'block';
+                    return;
+                }
+            }
+
+            console.log('=== RECEIVED PARAMETERS ===');
+            console.log('Access Token:', accessToken ? accessToken.substring(0, 50) + '...' : 'not found');
+            console.log('Error:', error);
+            console.log('Client ID:', clientId);
+            console.log('Tenant ID:', tenantId);
+            console.log('Expires In:', expiresIn);
+            console.log('Token Type:', tokenType);
+            console.log('============================');
+
+            // Função para obter dados do app do localStorage
+            function getAppData() {
+                try {
+                    const appDataStr = localStorage.getItem('embeddedSignupAppData');
+                    if (appDataStr) {
+                        return JSON.parse(appDataStr);
+                    }
+                } catch (e) {
+                    console.warn('Error getting app data from localStorage:', e);
+                }
+                return null;
+            }
+
+            // Function to get authentication token
+            function getAuthToken() {
+                try {
+                    const tokenStr = localStorage.getItem('token');
+                    if (tokenStr) {
+                        const token = JSON.parse(tokenStr);
+                        return token;
+                    }
+                } catch (e) {
+                    console.warn('Error getting token from localStorage:', e);
+                }
+                return null;
+            }
+
+            // Função auxiliar para obter URL da API
+            function getApiUrl() {
+                let apiUrl = '';
+                try {
+                    const apiUrlStr = localStorage.getItem('windowOrigin');
+                    if (apiUrlStr && apiUrlStr !== 'undefined' && apiUrlStr !== '') {
+                        apiUrl = apiUrlStr;
+                    } else {
+                        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                            apiUrl = window.location.origin.replace(/:\d+/, ':3101');
+                        } else {
+                            apiUrl = window.location.origin;
+                        }
+                    }
+                } catch (e) {
+                    apiUrl = window.location.origin;
+                }
+                
+                if (apiUrl && apiUrl.startsWith('/')) {
+                    apiUrl = window.location.origin + apiUrl;
+                }
+                
+                apiUrl = apiUrl.replace(/\/$/, '');
+                
+                return apiUrl;
+            }
+
+            // Função auxiliar para construir redirect URI de forma consistente
+            function getRedirectUri() {
+                // Tentar obter redirectUri do appData primeiro
+                const appData = getAppData();
+                if (appData && appData.redirectUri) {
+                    try {
+                        const redirectUriObj = new URL(appData.redirectUri);
+                        const normalizedUri = `${redirectUriObj.protocol}//${redirectUriObj.host}${redirectUriObj.pathname}`.replace(/\/$/, '');
+                        console.log('getRedirectUri() - Usando redirectUri do appData:', normalizedUri);
+                        return normalizedUri;
+                    } catch (e) {
+                        console.warn('Error parsing redirectUri from appData, using fallback:', e);
+                    }
+                }
+                
+                // Fallback: Construir redirect URI base
+                const baseUrl = window.location.origin;
+                const path = '/facebook-oauth-callback.html';
+                
+                if (!baseUrl) {
+                    console.error('window.location.origin is not available!');
+                    throw new Error('Could not determine base URL. window.location.origin is empty.');
+                }
+                
+                const redirectUri = baseUrl + path;
+                const normalizedUri = redirectUri.replace(/\/$/, '');
+                
+                console.log('getRedirectUri() - baseUrl:', baseUrl);
+                console.log('getRedirectUri() - path:', path);
+                console.log('getRedirectUri() - final redirectUri (fallback):', normalizedUri);
+                
+                return normalizedUri;
+            }
+
+            // Função para fazer chamada à API
+            async function callAPI(endpoint, method, data) {
+                const token = getAuthToken();
+                if (!token) {
+                    throw new Error('Authentication token not found');
+                }
+                
+                const apiUrl = localStorage.getItem('apiUrl');
+                const url = apiUrl + endpoint;
+                
+                const options = {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    }
+                };
+                
+                if (data && (method === 'POST' || method === 'PUT')) {
+                    options.body = JSON.stringify(data);
+                }
+                
+                console.log('Chamando API:', url);
+                console.log('Method:', method);
+                console.log('Data:', JSON.stringify(data, null, 2));
+                
+                const response = await fetch(url, options);
+                const responseData = await response.json();
+                
+                if (!response.ok) {
+                    console.error('API response error:', responseData);
+                    throw new Error(responseData.error || responseData.message || 'Request error');
+                }
+                
+                return responseData;
+            }
+
+            // Function to get Facebook user information
+            async function getFacebookUserInfo(accessToken, appData) {
+                console.log('=== GETTING FACEBOOK USER INFORMATION ===');
+                
+                try {
+                    const apiVersion = appData.apiVersion || 'v24.0';
+                    const sanitizedVersion = apiVersion.startsWith('v') || apiVersion.startsWith('V') 
+                        ? apiVersion.substring(1) 
+                        : apiVersion;
+                    
+                    // Get user ID and basic info
+                    const userResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/me?access_token=${accessToken}&fields=id,name,email`);
+                    const userData = await userResponse.json();
+                    
+                    if (!userResponse.ok || userData.error) {
+                        throw new Error(userData.error?.message || 'Error getting user information');
+                    }
+                    
+                    console.log('User data obtained:', userData);
+                    return userData;
+                } catch (error) {
+                    console.error('Error getting Facebook user information:', error);
+                    throw error;
+                }
+            }
+
+            // Function to get Facebook pages
+            async function getFacebookPages(accessToken, appData) {
+                console.log('=== GETTING FACEBOOK PAGES ===');
+                
+                try {
+                    const apiVersion = appData.apiVersion || 'v24.0';
+                    const sanitizedVersion = apiVersion.startsWith('v') || apiVersion.startsWith('V') 
+                        ? apiVersion.substring(1) 
+                        : apiVersion;
+                    
+                    // Try multiple endpoints to get pages
+                    // First, try /me/accounts (standard endpoint)
+                    let pagesResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/me/accounts?access_token=${accessToken}&fields=id,name,access_token`);
+                    let pagesData = await pagesResponse.json();
+                    
+                    console.log('Graph API response (Pages from /me/accounts):', pagesData);
+                    
+                    // If error or no pages, try /me/pages
+                    if (pagesData.error || !pagesData.data || pagesData.data.length === 0) {
+                        console.log('No pages from /me/accounts, trying /me/pages...');
+                        pagesResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/me/pages?access_token=${accessToken}&fields=id,name,access_token`);
+                        pagesData = await pagesResponse.json();
+                        console.log('Graph API response (Pages from /me/pages):', pagesData);
+                    }
+                    
+                    // If still no pages, try with pages_read_engagement permission
+                    if (pagesData.error || !pagesData.data || pagesData.data.length === 0) {
+                        console.log('No pages from /me/pages, trying with pages_read_engagement...');
+                        pagesResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/me?access_token=${accessToken}&fields=accounts{id,name,access_token}`);
+                        const userWithPages = await pagesResponse.json();
+                        console.log('Graph API response (User with accounts):', userWithPages);
+                        
+                        if (userWithPages.accounts && userWithPages.accounts.data) {
+                            pagesData = { data: userWithPages.accounts.data };
+                        }
+                    }
+                    
+                    if (!pagesResponse.ok || (pagesData.error && !pagesData.data)) {
+                        const errorMsg = pagesData.error?.message || 'Error getting pages';
+                        console.warn('Error getting pages:', errorMsg);
+                        // Return empty array instead of throwing error - we'll handle it later
+                        return { data: [] };
+                    }
+                    
+                    // Ensure we return an object with data array
+                    if (!pagesData.data) {
+                        pagesData = { data: [] };
+                    }
+                    
+                    return pagesData;
+                } catch (error) {
+                    console.error('Error getting Facebook pages:', error);
+                    // Return empty array instead of throwing - we'll handle it later
+                    return { data: [] };
+                }
+            }
+
+            // Function to create Facebook Messenger channel
+            async function createFacebookChannel(pageId, pageName, pageAccessToken, appData) {
+                console.log('=== CREATING FACEBOOK MESSENGER CHANNEL ===');
+                console.log('Page ID:', pageId);
+                console.log('Page Name:', pageName);
+                console.log('Page Access Token:', pageAccessToken ? 'Token obtained' : 'Not available');
+                
+                try {
+                    let wabaVersion = appData.apiVersion || 'v24.0';
+                    if (wabaVersion.startsWith('v') || wabaVersion.startsWith('V')) {
+                        wabaVersion = wabaVersion.substring(1);
+                    }
+                    
+                    const channelData = {
+                        name: pageName || `Facebook - ${pageId}`,
+                        type: 'messenger',
+                        fbPageId: pageId, // Page ID usado como fbPageId
+                        bmToken: pageAccessToken, // Page access token
+                        tokenAPI: pageId, // Page ID também usado como tokenAPI
+                        wabaVersion: wabaVersion,
+                        wabaId: appData.token,
+                        status: 'CONNECTED',
+                        isDefault: false
+                    };
+                    
+                    console.log('Channel data:', {
+                        ...channelData,
+                        bmToken: channelData.bmToken ? 'Page access token' : 'Not available',
+                        tokenAPI: channelData.tokenAPI ? 'Page access token' : 'Not available'
+                    });
+                    
+                    const result = await callAPI('/whatsapp', 'POST', channelData);
+                    console.log('Channel created successfully:', result);
+                    
+                    return result;
+                } catch (error) {
+                    console.error('Error creating Facebook channel:', error);
+                    throw error;
+                }
+            }
+
+            // Function to configure webhook
+            async function configureWebhook(pageId, pageAccessToken, appData, metaToken, tenantId) {
+                console.log('=== CONFIGURING WEBHOOK ===');
+                
+                try {
+                    let wabaVersion = appData.apiVersion || 'v24.0';
+                    if (wabaVersion.startsWith('v') || wabaVersion.startsWith('V')) {
+                        wabaVersion = wabaVersion.substring(1);
+                    }
+                    
+                    const apiUrl = localStorage.getItem('apiUrl');
+                    const callbackUrl = `${apiUrl}/messengerWebhook/${tenantId}`;
+                    
+                    const webhookData = {
+                        wabaId: pageId,
+                        wabaVersion: wabaVersion,
+                        wabaToken: pageAccessToken,
+                        overrideCallbackUri: callbackUrl,
+                        verifyToken: metaToken
+                    };
+                    
+                    console.log('Webhook data:', webhookData);
+                    
+                    await callAPI('/messengerMetaOverrideCallbackUrl', 'POST', webhookData);
+                    console.log('Webhook configured successfully');
+                } catch (error) {
+                    console.warn('Error configuring webhook:', error);
+                    throw error;
+                }
+            }
+
+            // Flag to ensure processFacebookOAuth runs only once
+            let isProcessingOAuth = false;
+            let hasProcessedOAuth = false;
+
+            // Main function to process the complete flow
+            async function processFacebookOAuth() {
+                console.log('=== processFacebookOAuth called ===');
+                console.log('isProcessingOAuth:', isProcessingOAuth);
+                console.log('hasProcessedOAuth:', hasProcessedOAuth);
+                
+                // Prevent duplicate execution
+                if (isProcessingOAuth) {
+                    console.warn('⚠️ processFacebookOAuth is already running. Ignoring duplicate call.');
+                    return;
+                }
+                
+                if (hasProcessedOAuth) {
+                    console.warn('⚠️ processFacebookOAuth has already been executed. Ignoring duplicate call.');
+                    return;
+                }
+                
+                isProcessingOAuth = true;
+                console.log('✅ Starting OAuth processing...');
+                
+                try {
+                    // Get app data first
+                    const appData = getAppData();
+                    
+                    // Check if there's an error in the URL (query string)
+                    if (error) {
+                        const errorMessage = error_description || error_reason || error || 'Facebook authorization error';
+                        throw new Error(errorMessage);
+                    }
+
+                    // Check if we have access token (from hash)
+                    if (!accessToken) {
+                        // If there's no token, we need to start the OAuth flow
+                        // This happens when the page loads without a token (first load)
+                        startFacebookOAuth();
+                        return;
+                    }
+
+                    // Validate app data
+                    if (!appData || !appData.appId) {
+                        throw new Error('Facebook app data not found. Please start the flow from the settings page and make sure the Facebook App ID is configured.');
+                    }
+
+                    // Update on-screen message
+                    const title = document.getElementById('title');
+                    const message = document.getElementById('message');
+                    if (title) title.textContent = 'Token received!';
+                    if (message) message.textContent = 'Processing token...';
+
+                    // IMPORTANTE: Para obter um token PERMANENTE (não expira), precisamos:
+                    // 1. Trocar o User Access Token short-lived por um long-lived token
+                    // 2. Usar o long-lived token para obter o Page Access Token permanente via /me/accounts
+                    
+                    // Step 1: Trocar User Access Token short-lived por long-lived token
+                    let longLivedToken = accessToken; // Fallback para o token original
+                    let permanentPageToken = null;
+                    
+                    if (appData && appData.appId && appData.appSecret) {
+                        try {
+                            if (message) message.textContent = 'Exchanging for permanent token...';
+                            
+                            const apiVersion = appData.apiVersion || 'v24.0';
+                            const sanitizedVersion = apiVersion.startsWith('v') || apiVersion.startsWith('V') 
+                                ? apiVersion.substring(1) 
+                                : apiVersion;
+                            
+                            // Trocar short-lived token por long-lived token (60 dias)
+                            const exchangeUrl = `https://graph.facebook.com/v${sanitizedVersion}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appData.appId}&client_secret=${appData.appSecret}&fb_exchange_token=${accessToken}`;
+                            
+                            console.log('=== EXCHANGING FOR LONG-LIVED TOKEN ===');
+                            const exchangeResponse = await fetch(exchangeUrl);
+                            const exchangeData = await exchangeResponse.json();
+                            
+                            if (exchangeData.access_token) {
+                                longLivedToken = exchangeData.access_token;
+                                console.log('Long-lived token obtained (expires in ' + (exchangeData.expires_in || 'unknown') + ' seconds)');
+                            } else {
+                                console.warn('Failed to exchange for long-lived token, using original token:', exchangeData);
+                            }
+                        } catch (error) {
+                            console.warn('Error exchanging for long-lived token, using original token:', error);
+                        }
+                    } else {
+                        console.warn('App ID or App Secret not found in appData, cannot exchange for long-lived token');
+                    }
+
+                    // Get user information
+                    let userInfo = null;
+                    try {
+                        userInfo = await getFacebookUserInfo(longLivedToken, appData);
+                        console.log('User information obtained:', userInfo);
+                    } catch (error) {
+                        console.error('Error getting user info:', error);
+                        throw new Error('Error getting user information: ' + (error.message || 'Unknown error'));
+                    }
+
+                    // Step 2: Obter Page Access Token PERMANENTE usando o long-lived token
+                    // IMPORTANTE: O Page Access Token obtido via /me/accounts com long-lived token é PERMANENTE (não expira)
+                    let pagesData = null;
+                    try {
+                        pagesData = await getFacebookPages(longLivedToken, appData);
+                        console.log('Pages data obtained:', pagesData);
+                    } catch (error) {
+                        console.error('Error getting pages:', error);
+                        throw new Error('Error getting pages: ' + (error.message || 'Unknown error'));
+                    }
+
+                    // Check if user has pages
+                    let pageId, pageName, pageAccessToken;
+                    
+                    if (!pagesData || !pagesData.data || pagesData.data.length === 0) {
+                        // No pages found - use user ID as page ID (Messenger can work with user ID)
+                        console.warn('No Facebook pages found. Using user ID as page ID for Messenger.');
+                        pageId = userInfo.id;
+                        pageName = userInfo.name || `Facebook - ${userInfo.id}`;
+                        pageAccessToken = longLivedToken; // Use long-lived token (60 dias)
+                        
+                        // Show warning message
+                        if (message) {
+                            message.textContent = 'No Facebook pages found. Creating channel with user account. Some features may be limited.';
+                            message.style.color = '#f57c00';
+                        }
+                    } else {
+                        // Use the first page
+                        // TODO: Allow user to select which page to use
+                        const firstPage = pagesData.data[0];
+                        pageId = firstPage.id;
+                        pageName = firstPage.name;
+                        // IMPORTANTE: O Page Access Token obtido via /me/accounts com long-lived token é PERMANENTE
+                        pageAccessToken = firstPage.access_token || longLivedToken;
+                        
+                        if (firstPage.access_token) {
+                            permanentPageToken = firstPage.access_token;
+                            console.log('✅ PERMANENT Page Access Token obtained (não expira)');
+                        } else {
+                            console.warn('Page access token not found, using long-lived token as fallback');
+                        }
+                    }
+
+                    console.log('=== FACEBOOK INFORMATION OBTAINED ===');
+                    console.log('User ID:', userInfo.id);
+                    console.log('User Name:', userInfo.name);
+                    console.log('Page ID:', pageId);
+                    console.log('Page Name:', pageName);
+                    console.log('Page Access Token:', pageAccessToken ? 'Yes' : 'No');
+                    console.log('Token Type:', permanentPageToken ? 'PERMANENT (não expira)' : 'Long-lived (60 dias)');
+                    console.log('=====================================');
+
+                    // Hide spinner
+                    const spinnerElement = document.getElementById('spinner');
+                    if (spinnerElement) spinnerElement.style.display = 'none';
+
+                    // Update message after getting all data
+                    if (title) {
+                        title.textContent = 'Token obtained!';
+                        title.style.color = '#1877F2';
+                    }
+                    if (message) {
+                        message.textContent = 'Token obtained successfully. Click the button below to create the channel.';
+                        message.style.color = '#2e7d32';
+                    }
+
+                    // Show token and obtained data details
+                    const details = document.getElementById('details');
+                    if (details) {
+                        const tokenType = permanentPageToken ? 'Permanent (não expira) ✅' : 'Long-lived (60 dias)';
+                        let detailsHtml = `
+                            <div class="details-item">
+                                <span class="details-label">User ID:</span> ${userInfo.id}
+                            </div>
+                            <div class="details-item">
+                                <span class="details-label">User Name:</span> ${userInfo.name || 'N/A'}
+                            </div>
+                            <div class="details-item">
+                                <span class="details-label">Page ID:</span> ${pageId}
+                            </div>
+                            <div class="details-item">
+                                <span class="details-label">Page Name:</span> ${pageName || 'N/A'}
+                            </div>
+                            <div class="details-item">
+                                <span class="details-label">Access Token:</span> ${tokenType}
+                            </div>
+                        `;
+                        
+                        details.innerHTML = detailsHtml;
+                        details.style.display = 'block';
+                    }
+
+                    // Show "Create Channel" button
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.textContent = 'Create Channel';
+                        backButton.style.display = 'block';
+                        backButton.onclick = async function() {
+                            // Disable button during creation
+                            backButton.disabled = true;
+                            backButton.textContent = 'Creating channel...';
+                            
+                            try {
+                                // Create channel
+                                const channelResult = await createFacebookChannel(pageId, pageName, pageAccessToken, appData);
+                                
+                                // Update message after creating channel
+                                if (title) {
+                                    title.textContent = 'Configuring webhook...';
+                                }
+                                
+                                // Configure webhook if we have metaToken and tenantId
+                                if (metaToken && tenantId) {
+                                    try {
+                                        await configureWebhook(pageId, pageAccessToken, appData, metaToken, tenantId);
+                                        
+                                        if (message) {
+                                            message.textContent = 'Webhook configured successfully!';
+                                        }
+                                    } catch (webhookError) {
+                                        console.warn('Error configuring webhook:', webhookError);
+                                        // Don't block the process if webhook fails
+                                        if (message) {
+                                            message.textContent = 'Channel created, but there was a warning when configuring the webhook.';
+                                        }
+                                    }
+                                }
+                                
+                                // Success - update message and redirect
+                                if (title) {
+                                    title.innerHTML = '<span class="success-icon">✓</span><br>Facebook Messenger Channel Created!';
+                                    title.style.color = '#2e7d32';
+                                }
+                                if (message) {
+                                    message.textContent = 'Channel created successfully! Redirecting...';
+                                    message.style.color = '#2e7d32';
+                                }
+                                
+                                // Update details with channel ID
+                                if (details) {
+                                    let detailsHtml = `
+                                        <div class="details-item">
+                                            <span class="details-label">User ID:</span> ${userInfo.id}
+                                        </div>
+                                        <div class="details-item">
+                                            <span class="details-label">Page ID:</span> ${pageId}
+                                        </div>
+                                        <div class="details-item">
+                                            <span class="details-label">Page Name:</span> ${pageName || 'N/A'}
+                                        </div>
+                                    `;
+                                    
+                                    if (channelResult && channelResult.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.id}</div>`;
+                                    } else if (channelResult && channelResult.data && channelResult.data.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.data.id}</div>`;
+                                    } else if (channelResult && channelResult.data && channelResult.data.whatsapp && channelResult.data.whatsapp.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.data.whatsapp.id}</div>`;
+                                    }
+                                    
+                                    detailsHtml += `<div class="details-item"><span class="details-label">Status:</span> CONNECTED</div>`;
+                                    
+                                    details.innerHTML = detailsHtml;
+                                }
+                                
+                                console.log('=== PROCESS COMPLETED SUCCESSFULLY ===');
+                                console.log('User ID:', userInfo.id);
+                                console.log('Page ID:', pageId);
+                                console.log('Page Name:', pageName);
+                                console.log('Channel created:', channelResult);
+                                console.log('=====================================');
+                                
+                                // Mark that processing was completed successfully
+                                hasProcessedOAuth = true;
+                                isProcessingOAuth = false;
+                                
+                                // Redirect after 2 seconds
+                                setTimeout(function() {
+                                    window.location.href = '/#/configuracoes/meta?facebookSuccess=true&pageId=' + pageId;
+                                }, 2000);
+                            } catch (error) {
+                                console.error('Error creating channel:', error);
+                                
+                                // Show error
+                                if (title) {
+                                    title.textContent = 'Error creating channel';
+                                    title.style.color = '#d32f2f';
+                                }
+                                if (message) {
+                                    message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                    message.style.color = '#d32f2f';
+                                }
+                                
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                    errorDiv.style.display = 'block';
+                                }
+                                
+                                // Re-enable button and change text
+                                backButton.disabled = false;
+                                backButton.textContent = 'Back to Settings';
+                                backButton.onclick = function() {
+                                    window.location.href = '/#/configuracoes/meta?facebookError=' + encodeURIComponent(error.message || 'Error creating channel');
+                                };
+                            }
+                        };
+                    }
+
+                    // Mark that processing was completed (but channel hasn't been created yet)
+                    hasProcessedOAuth = true;
+                    isProcessingOAuth = false;
+
+                } catch (error) {
+                    console.error('Error processing Facebook OAuth:', error);
+                    
+                    // Mark that processing was completed (even with error)
+                    hasProcessedOAuth = true;
+                    isProcessingOAuth = false;
+                    
+                    // Hide spinner
+                    const spinnerEl = document.getElementById('spinner');
+                    if (spinnerEl) spinnerEl.style.display = 'none';
+                    
+                    // Show error
+                    const title = document.getElementById('title');
+                    if (title) {
+                        title.textContent = 'Error';
+                        title.style.color = '#d32f2f';
+                    }
+                    
+                    const message = document.getElementById('message');
+                    if (message) {
+                        message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                        message.style.color = '#d32f2f';
+                    }
+                    
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                        errorDiv.style.display = 'block';
+                    }
+                    
+                    // Show back button
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.style.display = 'block';
+                        backButton.textContent = 'Back to Settings';
+                        backButton.onclick = function() {
+                            window.location.href = '/#/configuracoes/meta?facebookError=' + encodeURIComponent(error.message || 'Error processing Facebook OAuth');
+                        };
+                    }
+                }
+            }
+
+            // Function to start OAuth flow
+            function startFacebookOAuth() {
+                console.log('=== STARTING FACEBOOK OAuth FLOW ===');
+                
+                // Get app data
+                const appData = getAppData();
+                if (!appData || !appData.appId) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'App data not found. Please start the flow from the settings page.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    setTimeout(() => {
+                        window.location.href = '/#/configuracoes/meta?error=missing_app_data';
+                    }, 3000);
+                    return;
+                }
+
+                // Build redirect URI
+                const redirectUri = getRedirectUri();
+                const encodedRedirectUri = encodeURIComponent(redirectUri);
+                
+                // Facebook OAuth uses implicit flow (response_type=token)
+                const responseType = 'token';
+                const scopes = [
+                    'pages_messaging',
+                    'pages_utility_messaging',
+                    'pages_show_list',
+                    'pages_read_engagement'
+                ].join('%2C');
+                
+                // Use appId from appData or clientId from URL
+                const facebookAppId = appData?.appId || clientId;
+                
+                if (!facebookAppId) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Facebook App ID not found. Make sure the app is configured correctly.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    setTimeout(() => {
+                        window.location.href = '/#/configuracoes/meta?error=missing_facebook_app_id';
+                    }, 3000);
+                    return;
+                }
+                
+                // Build Facebook OAuth URL
+                const facebookAuthUrl = `https://www.facebook.com/dialog/oauth?client_id=${facebookAppId}&display=popup&redirect_uri=${encodedRedirectUri}&response_type=${responseType}&scope=${scopes}`;
+                
+                console.log('=== STARTING FACEBOOK OAuth FLOW ===');
+                console.log('Facebook App ID:', facebookAppId);
+                console.log('Client ID (from URL):', clientId);
+                console.log('Redirect URI:', redirectUri);
+                console.log('Authorization URL:', facebookAuthUrl.replace(facebookAppId, 'FACEBOOK_APP_ID'));
+                console.log('=====================================');
+
+                // Update message
+                const title = document.getElementById('title');
+                const message = document.getElementById('message');
+                if (title) title.textContent = 'Opening Facebook authorization...';
+                if (message) message.textContent = 'Please wait while we open the Facebook authorization page.';
+
+                // Open Facebook OAuth popup
+                const popup = window.open(
+                    facebookAuthUrl,
+                    'facebook-oauth',
+                    'width=600,height=700,scrollbars=yes,resizable=yes'
+                );
+                
+                if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+                    console.error('Popup blocked by browser!');
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Popup blocked by browser. Please allow popups for this site.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinnerEl = document.getElementById('spinner');
+                    if (spinnerEl) spinnerEl.style.display = 'none';
+                    if (title) {
+                        title.textContent = 'Popup blocked';
+                        title.style.color = '#d32f2f';
+                    }
+                    if (message) {
+                        message.textContent = 'Please allow popups for this site and try again.';
+                        message.style.color = '#d32f2f';
+                    }
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.style.display = 'block';
+                    }
+                    setTimeout(function() {
+                        window.location.href = '/#/configuracoes/meta?error=popup_blocked';
+                    }, 3000);
+                    return;
+                }
+                
+                console.log('Popup opened successfully');
+                
+                // Monitor popup to detect when it redirects to our URL
+                const checkPopupInterval = setInterval(function() {
+                    try {
+                        // Check if popup was closed
+                        if (popup.closed) {
+                            clearInterval(checkPopupInterval);
+                            console.log('Popup was closed by user');
+                            
+                            // Check if we have token in current URL hash (may have been captured)
+                            const currentHash = window.location.hash;
+                            if (!currentHash || !currentHash.includes('access_token')) {
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Authorization canceled or popup closed.';
+                                    errorDiv.style.display = 'block';
+                                }
+                                const spinner = document.getElementById('spinner');
+                                if (spinner) spinner.style.display = 'none';
+                                const title = document.getElementById('title');
+                                if (title) {
+                                    title.textContent = 'Authorization canceled';
+                                    title.style.color = '#f57c00';
+                                }
+                                const message = document.getElementById('message');
+                                if (message) {
+                                    message.textContent = 'The popup was closed. Please try again.';
+                                    message.style.color = '#f57c00';
+                                }
+                                const backButton = document.getElementById('backButton');
+                                if (backButton) {
+                                    backButton.style.display = 'block';
+                                }
+                                setTimeout(function() {
+                                    window.location.href = '/#/configuracoes/meta?error=popup_closed';
+                                }, 2000);
+                            }
+                            return;
+                        }
+                        
+                        // Try to access popup URL (may generate CORS error, but we try)
+                        try {
+                            const popupUrl = popup.location.href;
+                            
+                            // If popup redirected to our URL, capture token from hash and reload page
+                            if (popupUrl.includes(window.location.origin) && popupUrl.includes('facebook-oauth-callback.html')) {
+                                clearInterval(checkPopupInterval);
+                                
+                                const popupUrlObj = new URL(popupUrl);
+                                const hash = popupUrlObj.hash;
+                                
+                                if (hash && hash.includes('access_token')) {
+                                    console.log('OAuth token captured from popup hash');
+                                    
+                                    // Close popup
+                                    popup.close();
+                                    
+                                    // Update current URL with hash and process
+                                    window.location.hash = hash;
+                                    // Reload to process the token
+                                    window.location.reload();
+                                }
+                            }
+                        } catch (e) {
+                            // CORS error accessing popup.location - normal, continue monitoring
+                            // Token will be captured when popup redirects to our page
+                        }
+                    } catch (e) {
+                        // Error checking popup - continue trying
+                    }
+                }, 500); // Check every 500ms
+                
+                // Clear interval after 5 minutes (timeout)
+                setTimeout(function() {
+                    clearInterval(checkPopupInterval);
+                    if (!popup.closed) {
+                        popup.close();
+                    }
+                }, 300000); // 5 minutes
+            }
+
+            // Start processing when page loads
+            // Use a flag to ensure it runs only once
+            let hasInitialized = false;
+            
+            function initializeOAuth() {
+                console.log('=== initializeOAuth called ===');
+                console.log('hasInitialized:', hasInitialized);
+                console.log('document.readyState:', document.readyState);
+                
+                if (hasInitialized) {
+                    console.warn('⚠️ initializeOAuth has already been called. Ignoring.');
+                    return;
+                }
+                hasInitialized = true;
+                console.log('✅ Initializing OAuth...');
+                
+                // If we have access token in hash, process it
+                if (accessToken) {
+                    console.log('Access token found, processing OAuth...');
+                    processFacebookOAuth();
+                } else {
+                    console.log('No access token found, starting OAuth flow...');
+                    startFacebookOAuth();
+                }
+            }
+            
+            if (document.readyState === 'loading') {
+                console.log('Document still loading, waiting for DOMContentLoaded...');
+                document.addEventListener('DOMContentLoaded', initializeOAuth);
+            } else {
+                console.log('Document already loaded, initializing immediately...');
+                initializeOAuth();
+            }
+        })();
+    </script>
+</body>
+</html>
+

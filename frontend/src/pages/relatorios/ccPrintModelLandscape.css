@@ -1,0 +1,118 @@
+.page-header,
+.page-header-space {
+  height: 100px;
+}
+
+.page-footer,
+.page-footer-space {
+  height: 50px;
+}
+
+.page-footer {
+  position: fixed;
+  bottom: 0;
+  width: 100%;
+  border-top: 1px solid black; /* for demo */
+  background: yellow; /* for demo */
+}
+
+.page-header {
+  position: fixed;
+  top: 0mm;
+  width: 100%;
+  border-bottom: 1px solid black; /* for demo */
+  background: yellow; /* for demo */
+}
+
+.page {
+  page-break-after: always;
+}
+
+#pageInit {
+  display: none;
+}
+
+@page {
+  margin: 20mm;
+}
+
+@media print {
+  #pageInit {
+    display: initial;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tfoot {
+    display: table-footer-group;
+  }
+
+  button {
+    display: none;
+  }
+
+  body {
+    margin: 0;
+  }
+}
+
+.marginsPage {
+  margin-left: 1cm !important;
+  margin-right: 1cm !important;
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+  padding: 0.5cm 0.5cm 0.5cm 0.5cm;
+}
+
+.page-header {
+  border-bottom: 2px solid #e0e0e0;
+  background: #f8f8fa;
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  padding-bottom: 0.2cm;
+}
+
+.page-footer {
+  border-top: 2px solid #e0e0e0;
+  background: #f8f8fa;
+  border-radius: 0 0 18px 18px;
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.04);
+  padding-top: 0.2cm;
+}
+
+table {
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+}
+
+thead tr td {
+  background: #eaeaff !important;
+  color: #222 !important;
+  font-weight: 600;
+  font-size: 1.05em;
+  border-bottom: 1px solid #d0d0d0;
+}
+
+tbody tr td {
+  font-size: 0.98em;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+@media print {
+  .marginsPage {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+  .page-header, .page-footer {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+  }
+  table {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+}

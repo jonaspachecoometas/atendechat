@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram OAuth Callback</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 600px;
+            width: 90%;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #E4405F;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            color: #d32f2f;
+            margin-top: 20px;
+        }
+        .success {
+            color: #2e7d32;
+            margin-top: 20px;
+        }
+        .success-icon {
+            color: #2e7d32;
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .back-button {
+            background-color: #E4405F;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background-color 0.3s;
+        }
+        .back-button:hover {
+            background-color: #C13584;
+        }
+        .back-button:active {
+            background-color: #8B2A5C;
+        }
+        .back-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .details {
+            background-color: #f5f5f5;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: left;
+            font-size: 14px;
+        }
+        .details-item {
+            margin: 8px 0;
+        }
+        .details-label {
+            font-weight: 600;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="spinner" class="spinner"></div>
+        <h3 id="title">Processing Instagram authorization...</h3>
+        <p id="message">Please wait while we process the Instagram authorization.</p>
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="success" class="success" style="display: none;"></div>
+        <div id="details" class="details" style="display: none;"></div>
+        <button id="backButton" class="back-button" style="display: none;" onclick="window.location.href='/#/configuracoes/meta'">
+            Back to Settings
+        </button>
+    </div>
+
+    <script>
+        (function() {
+            // Capturar parâmetros da URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            const error = urlParams.get('error');
+            const error_reason = urlParams.get('error_reason');
+            const error_description = urlParams.get('error_description');
+            const state = urlParams.get('state');
+
+            // Parâmetros para configurar o fluxo
+            const clientId = urlParams.get('client_id');
+            const tenantId = urlParams.get('tenantId');
+            const metaToken = urlParams.get('metaToken');
+
+            console.log('=== RECEIVED PARAMETERS ===');
+            console.log('Code:', code ? code.substring(0, 50) + '...' : 'not found');
+            console.log('Error:', error);
+            console.log('Client ID:', clientId);
+            console.log('Tenant ID:', tenantId);
+            console.log('============================');
+
+            // Função para obter dados do app do localStorage
+            function getAppData() {
+                try {
+                    const appDataStr = localStorage.getItem('embeddedSignupAppData');
+                    if (appDataStr) {
+                        return JSON.parse(appDataStr);
+                    }
+                } catch (e) {
+                    console.warn('Error getting app data from localStorage:', e);
+                }
+                return null;
+            }
+
+            // Function to get authentication token
+            function getAuthToken() {
+                try {
+                    const tokenStr = localStorage.getItem('token');
+                    if (tokenStr) {
+                        const token = JSON.parse(tokenStr);
+                        return token;
+                    }
+                } catch (e) {
+                    console.warn('Error getting token from localStorage:', e);
+                }
+                return null;
+            }
+
+            // Função auxiliar para obter URL da API
+            function getApiUrl() {
+                let apiUrl = '';
+                try {
+                    const apiUrlStr = localStorage.getItem('windowOrigin');
+                    if (apiUrlStr && apiUrlStr !== 'undefined' && apiUrlStr !== '') {
+                        apiUrl = apiUrlStr;
+                    } else {
+                        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                            apiUrl = window.location.origin.replace(/:\d+/, ':3101');
+                        } else {
+                            apiUrl = window.location.origin;
+                        }
+                    }
+                } catch (e) {
+                    apiUrl = window.location.origin;
+                }
+                
+                if (apiUrl && apiUrl.startsWith('/')) {
+                    apiUrl = window.location.origin + apiUrl;
+                }
+                
+                apiUrl = apiUrl.replace(/\/$/, '');
+                
+                return apiUrl;
+            }
+
+            // Função auxiliar para construir redirect URI de forma consistente
+            // IMPORTANTE: O redirect_uri deve ser exatamente o mesmo usado na autorização e no exchange
+            function getRedirectUri() {
+                // Tentar obter redirectUri do appData primeiro (redirectUriInstagram)
+                const appData = getAppData();
+                if (appData && appData.redirectUri) {
+                    // Normalizar: remover query params e trailing slash
+                    try {
+                        const redirectUriObj = new URL(appData.redirectUri);
+                        const normalizedUri = `${redirectUriObj.protocol}//${redirectUriObj.host}${redirectUriObj.pathname}`.replace(/\/$/, '');
+                        console.log('getRedirectUri() - Usando redirectUri do appData:', normalizedUri);
+                        return normalizedUri;
+                    } catch (e) {
+                        console.warn('Error parsing redirectUri from appData, using fallback:', e);
+                    }
+                }
+                
+                // Fallback: Construir redirect URI base (sem query params, sem trailing slash)
+                const baseUrl = window.location.origin;
+                const path = '/instagram-oauth-callback.html';
+                
+                if (!baseUrl) {
+                    console.error('window.location.origin is not available!');
+                    throw new Error('Could not determine base URL. window.location.origin is empty.');
+                }
+                
+                const redirectUri = baseUrl + path;
+                const normalizedUri = redirectUri.replace(/\/$/, '');
+                
+                console.log('getRedirectUri() - baseUrl:', baseUrl);
+                console.log('getRedirectUri() - path:', path);
+                console.log('getRedirectUri() - final redirectUri (fallback):', normalizedUri);
+                
+                // Ensure no trailing slash
+                return normalizedUri;
+            }
+
+            // Função para fazer chamada à API
+            async function callAPI(endpoint, method, data) {
+                const token = getAuthToken();
+                if (!token) {
+                    throw new Error('Authentication token not found');
+                }
+                
+                const apiUrl = localStorage.getItem('apiUrl');
+                const url = apiUrl + endpoint;
+                
+                const options = {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    }
+                };
+                
+                if (data && (method === 'POST' || method === 'PUT')) {
+                    options.body = JSON.stringify(data);
+                }
+                
+                console.log('Chamando API:', url);
+                console.log('Method:', method);
+                console.log('Data completo:', JSON.stringify(data, null, 2));
+                console.log('Data redirectUri:', data?.redirectUri || 'UNDEFINED');
+                console.log('Data redirectUri tipo:', typeof data?.redirectUri);
+                
+                const response = await fetch(url, options);
+                const responseData = await response.json();
+                
+                if (!response.ok) {
+                    console.error('API response error:', responseData);
+                    throw new Error(responseData.error || responseData.message || 'Request error');
+                }
+                
+                return responseData;
+            }
+
+            // Singleton para garantir apenas uma chamada de exchangeCodeForToken
+            let exchangePromise = null; // Promise da requisição em andamento (singleton)
+            let exchangeResult = null; // Resultado em cache
+
+            // Função para trocar código OAuth por access token
+            // Retorna tanto o access_token quanto o user_id (número da conta)
+            // IMPORTANTE: instagramAppId deve ser o appInstagramId usado na autorização
+            // IMPORTANTE: appData.appSecret contém o appInstagramSecret
+            // GARANTE: Apenas uma chamada será feita, mesmo com múltiplas execuções simultâneas
+            async function exchangeCodeForToken(code, instagramAppId, appData, redirectUri) {
+                console.log('=== TROCANDO CÓDIGO POR ACCESS TOKEN ===');
+                console.log('Código:', code.substring(0, 50) + '...');
+                console.log('Instagram App ID (appInstagramId):', instagramAppId);
+                console.log('Redirect URI recebido:', redirectUri);
+                console.log('exchangeResult já existe?', !!exchangeResult);
+                console.log('exchangePromise existe?', !!exchangePromise);
+                
+                // If we already have cached result, return immediately
+                if (exchangeResult) {
+                    console.log('✅ Returning cached result');
+                    return exchangeResult;
+                }
+                
+                // If a promise is already in progress, wait and return its result
+                // This is the key: if the promise already exists, we always return it (singleton)
+                if (exchangePromise) {
+                    console.log('✅ Request already in progress. Waiting for existing request result...');
+                    try {
+                        const result = await exchangePromise;
+                        console.log('✅ Returning existing request result');
+                        return result;
+                    } catch (error) {
+                        // If request failed, clear to allow new attempt
+                        console.warn('⚠️ Previous request failed, clearing to allow new attempt...');
+                        exchangePromise = null;
+                        // Don't clear exchangeResult here, as it may have been set before the error
+                    }
+                }
+                
+                // Validate redirectUri before sending
+                if (!redirectUri || redirectUri.trim() === '') {
+                    throw new Error('Redirect URI cannot be empty. Check if getRedirectUri() is returning a valid value.');
+                }
+                
+                // Create promise ONCE (singleton pattern)
+                // If another call arrives at the same time, it will see exchangePromise already defined
+                // and return in the check above
+                console.log('🔒 Creating new request (singleton)...');
+                exchangePromise = (async () => {
+                    const requestData = {
+                        code: code,
+                        appId: instagramAppId, // Usar o appInstagramId usado na autorização
+                        appSecret: appData.appSecret, // appInstagramSecret
+                        redirectUri: redirectUri,
+                        apiVersion: appData.apiVersion || 'v24.0'
+                    };
+                    
+                    console.log('Data to be sent to backend:', {
+                        ...requestData,
+                        appSecret: requestData.appSecret ? '***' : 'UNDEFINED',
+                        redirectUri: requestData.redirectUri || 'UNDEFINED'
+                    });
+                    
+                    try {
+                        // Usar endpoint do backend para evitar problemas de CORS
+                        // O Instagram usa endpoint específico: https://api.instagram.com/oauth/access_token
+                        // IMPORTANTE: Usar instagramAppId (appInstagramId) como appId no exchange
+                        // IMPORTANTE: appSecret contém o appInstagramSecret
+                        const result = await callAPI('/instagramMetaExchangeEmbeddedSignupCode/', 'POST', requestData);
+                        
+                        console.log('Backend response:', {
+                            hasAccessToken: !!result.access_token,
+                            hasUserId: !!result.user_id,
+                            userId: result.user_id || 'N/A'
+                        });
+                        
+                        if (result && result.access_token) {
+                            console.log('✅ Access token obtained successfully!');
+                            // Store result in cache
+                            exchangeResult = {
+                                access_token: result.access_token,
+                                user_id: result.user_id,
+                                username: result.username
+                            };
+                            // Keep promise for future calls (return cached result)
+                            return exchangeResult;
+                        }
+                        
+                        throw new Error('Token not returned in response');
+                    } catch (error) {
+                        console.error('❌ Error exchanging code for token:', error);
+                        // Clear promise on error to allow new attempt
+                        exchangePromise = null;
+                        throw error;
+                    }
+                })();
+                
+                // Retornar a promise (singleton)
+                return exchangePromise;
+            }
+
+            // Function to get Instagram page information
+            async function getInstagramPageInfo(accessToken, appData) {
+                console.log('=== GETTING INSTAGRAM PAGE INFORMATION ===');
+                
+                try {
+                    // Use Graph API directly via backend to get user pages
+                    // First, get user ID
+                    const apiVersion = appData.apiVersion || 'v24.0';
+                    const sanitizedVersion = apiVersion.startsWith('v') || apiVersion.startsWith('V') 
+                        ? apiVersion.substring(1) 
+                        : apiVersion;
+                    
+                    // Get user ID
+                    const userResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/me?access_token=${accessToken}`);
+                    const userData = await userResponse.json();
+                    
+                    if (!userResponse.ok || userData.error) {
+                        throw new Error(userData.error?.message || 'Error getting user ID');
+                    }
+                    
+                    const userId = userData.id;
+                    console.log('User ID obtained:', userId);
+                    
+                    // Get user pages
+                    const pagesResponse = await fetch(`https://graph.facebook.com/v${sanitizedVersion}/${userId}/accounts?access_token=${accessToken}&fields=id,name,instagram_business_account`);
+                    const pagesData = await pagesResponse.json();
+                    
+                    console.log('Graph API response (Pages):', pagesData);
+                    
+                    if (!pagesResponse.ok || pagesData.error) {
+                        throw new Error(pagesData.error?.message || 'Error getting pages');
+                    }
+                    
+                    return pagesData;
+                } catch (error) {
+                    console.error('Error getting Instagram page information:', error);
+                    throw error;
+                }
+            }
+
+
+            // Function to create Instagram channel
+            // IMPORTANT: For Instagram Business Login, the user_id (IG_ID) from /me endpoint
+            // will be used as fbPageId and tokenAPI (according to documentation)
+            async function createInstagramChannel(instagramUserId, pageName, longLivedToken, appData) {
+                console.log('=== CREATING INSTAGRAM CHANNEL ===');
+                console.log('Instagram User ID (IG_ID) - will be used as fbPageId and tokenAPI:', instagramUserId);
+                console.log('Page Name:', pageName);
+                console.log('Long-lived Token (will be saved in bmToken):', longLivedToken ? 'Token obtained' : 'Not available');
+                
+                try {
+                    // Sanitizar wabaVersion
+                    let wabaVersion = appData.apiVersion || 'v24.0';
+                    if (wabaVersion.startsWith('v') || wabaVersion.startsWith('V')) {
+                        wabaVersion = wabaVersion.substring(1);
+                    }
+
+                    const channelData = {
+                        name: pageName || `Instagram - ${instagramUserId}`,
+                        type: 'instagram',
+                        fbPageId: instagramUserId, // IG_ID do /me endpoint
+                        bmToken: longLivedToken, // Long-lived access token (60 dias)
+                        fbLoginId: instagramUserId, // IG_ID do /me endpoint
+                        tokenAPI: instagramUserId, // IG_ID do /me endpoint (mesmo valor)
+                        wabaVersion: wabaVersion,
+                        wabaId: appData.token,
+                        status: 'CONNECTED',
+                        isDefault: false
+                    };
+                    
+                    console.log('Channel data:', {
+                        ...channelData,
+                        bmToken: channelData.bmToken ? 'Long-lived token (60 days)' : 'Not available'
+                    });
+                    
+                    const result = await callAPI('/whatsapp', 'POST', channelData);
+                    console.log('Channel created successfully:', result);
+                    
+                    return result;
+                } catch (error) {
+                    console.error('Error creating Instagram channel:', error);
+                    throw error;
+                }
+            }
+
+            // Function to configure webhook
+            async function configureWebhook(instagramUserId, longLivedToken, appData, metaToken, tenantId) {
+                console.log('=== CONFIGURING WEBHOOK ===');
+                
+                try {
+                    let wabaVersion = appData.apiVersion || 'v24.0';
+                    if (wabaVersion.startsWith('v') || wabaVersion.startsWith('V')) {
+                        wabaVersion = wabaVersion.substring(1);
+                    }
+                    
+                    const apiUrl = localStorage.getItem('apiUrl');
+                    const callbackUrl = `${apiUrl}/instagramWebhook/${tenantId}`;
+                    
+                    const webhookData = {
+                        wabaId: instagramUserId, // IG_ID will be used as wabaId
+                        wabaVersion: wabaVersion,
+                        wabaToken: longLivedToken, // Long-lived token
+                        overrideCallbackUri: callbackUrl,
+                        verifyToken: metaToken
+                    };
+                    
+                    console.log('Webhook data:', webhookData);
+                    
+                    await callAPI('/instagramMetaOverrideCallbackUrl', 'POST', webhookData);
+                    console.log('Webhook configured successfully');
+                } catch (error) {
+                    console.warn('Error configuring webhook:', error);
+                    throw error;
+                }
+            }
+
+            // Flag to ensure processInstagramOAuth runs only once
+            let isProcessingOAuth = false;
+            let hasProcessedOAuth = false;
+
+            // Main function to process the complete flow
+            async function processInstagramOAuth() {
+                console.log('=== processInstagramOAuth called ===');
+                console.log('isProcessingOAuth:', isProcessingOAuth);
+                console.log('hasProcessedOAuth:', hasProcessedOAuth);
+                
+                // Prevent duplicate execution
+                if (isProcessingOAuth) {
+                    console.warn('⚠️ processInstagramOAuth is already running. Ignoring duplicate call.');
+                    return;
+                }
+                
+                if (hasProcessedOAuth) {
+                    console.warn('⚠️ processInstagramOAuth has already been executed. Ignoring duplicate call.');
+                    return;
+                }
+                
+                isProcessingOAuth = true;
+                console.log('✅ Starting OAuth processing...');
+                
+                try {
+                    // Get app data first (to use in error messages)
+                    const appData = getAppData();
+                    
+                    // Check if there's an error in the URL (returned by Instagram)
+                    if (error) {
+                        const errorMessage = error_description || error_reason || error || 'Instagram authorization error';
+                        
+                        // Specific handling for "Invalid platform app"
+                        if (errorMessage.includes('Invalid platform app') || errorMessage.includes('Invalid platform')) {
+                            const errorDiv = document.getElementById('error');
+                            const title = document.getElementById('title');
+                            const message = document.getElementById('message');
+                            const spinner = document.getElementById('spinner');
+                            const backButton = document.getElementById('backButton');
+                            
+                            if (spinner) spinner.style.display = 'none';
+                            if (title) {
+                                title.textContent = 'Error: App not configured correctly';
+                                title.style.color = '#d32f2f';
+                            }
+                            if (errorDiv) {
+                                const currentAppId = appData?.appId || clientId || 'Not configured';
+                                errorDiv.innerHTML = `
+                                    <strong>Error: Invalid platform app</strong><br><br>
+                                    The configured Instagram App ID is not valid or the app is not configured for Instagram Business Login.<br><br>
+                                    <strong>How to fix:</strong><br>
+                                    1. Go to the <a href="https://developers.facebook.com/apps" target="_blank">App Dashboard</a><br>
+                                    2. Go to <strong>Instagram > API setup with Instagram login</strong><br>
+                                    3. Configure <strong>Instagram Business Login</strong><br>
+                                    4. Copy the <strong>Instagram App ID</strong> (not the Facebook App ID)<br>
+                                    5. Configure the <strong>Instagram App ID</strong> and <strong>Instagram App Secret</strong> in the App WABA settings<br><br>
+                                    <strong>Current Instagram App ID:</strong> ${currentAppId}<br>
+                                    <strong>Client ID (from URL):</strong> ${clientId || 'Not configured'}
+                                `;
+                                errorDiv.style.display = 'block';
+                            }
+                            if (backButton) backButton.style.display = 'block';
+                            return;
+                        }
+                        
+                        // Other errors
+                        throw new Error(errorMessage);
+                    }
+
+                    // Check if there's a code
+                    if (!code) {
+                        // If there's no code or error, user may have canceled or there was a problem
+                        const errorDiv = document.getElementById('error');
+                        const title = document.getElementById('title');
+                        const message = document.getElementById('message');
+                        const spinner = document.getElementById('spinner');
+                        const backButton = document.getElementById('backButton');
+                        
+                        if (spinner) spinner.style.display = 'none';
+                        if (title) {
+                            title.textContent = 'Authorization canceled or incomplete';
+                            title.style.color = '#d32f2f';
+                        }
+                        if (message) {
+                            message.textContent = 'Authorization code was not received. This may happen if you canceled the authorization or if there was a problem with the app configuration.';
+                            message.style.color = '#d32f2f';
+                        }
+                        if (backButton) backButton.style.display = 'block';
+                        return;
+                    }
+
+                // appData was already obtained above
+                // IMPORTANT: For Instagram, appData.appId contains appInstagramId and appData.appSecret contains appInstagramSecret
+                if (!appData || !appData.appId || !appData.appSecret) {
+                    throw new Error('Instagram app data not found. Please start the flow from the settings page and make sure the Instagram App ID and Instagram App Secret are configured.');
+                }
+
+                // IMPORTANT: For Instagram Business Login, appId must be the Instagram App ID (appInstagramId)
+                // The Instagram App ID is in: App Dashboard > Instagram > API setup with Instagram login > 
+                // 3. Set up Instagram business login > Business login settings > Instagram App ID
+                // If you get "Invalid platform app" error, check if you're using the correct Instagram App ID
+                if (!appData.appId || appData.appId.length < 10) {
+                    throw new Error('Invalid Instagram App ID. Make sure the app is configured with Instagram Business Login and that the Instagram App ID is correct.');
+                }
+
+                // Update on-screen message
+                const title = document.getElementById('title');
+                const message = document.getElementById('message');
+                if (title) title.textContent = 'Code received!';
+                if (message) message.textContent = 'Exchanging code for access token...';
+
+                // Build redirect URI (must be exactly the same as used in authorization)
+                // IMPORTANT: redirect_uri should not include query params
+                const redirectUri = getRedirectUri();
+                console.log('Redirect URI for exchange (must be same as authorization):', redirectUri);
+
+                    // Hide spinner
+                    const spinnerEl = document.getElementById('spinner');
+                    if (spinnerEl) spinnerEl.style.display = 'none';
+
+                    // Exchange code for access token (to get user_id)
+                    // IMPORTANT: The original OAuth code will be saved in bmToken
+                    // The user_id (account number) will be saved in fbLoginId and tokenAPI
+                    // IMPORTANT: For Instagram, use appInstagramId (saved as appId in appData)
+                    // Prioritize appData.appId (which contains appInstagramId) over clientId
+                    const instagramAppId = appData?.appId || clientId;
+                    if (!instagramAppId) {
+                        throw new Error('Instagram App ID not found. Make sure the app is configured with Instagram Business Login.');
+                    }
+                    
+                    // Step 2 and 3: Exchange code for token (short-lived) and then for long-lived token
+                    // The service already does everything: Step 2 -> Step 3 -> /me endpoint
+                    let accessToken = null; // Long-lived token
+                    let instagramUserId = null; // IG_ID from /me endpoint - will be used as fbPageId and tokenAPI
+                    let username = null;
+                    
+                    try {
+                        const tokenResult = await exchangeCodeForToken(code, instagramAppId, appData, redirectUri);
+                        accessToken = tokenResult.access_token; // Long-lived token (60 days)
+                        
+                        // user_id comes from /me endpoint and is the IG_ID that will be used as fbPageId and tokenAPI
+                        if (tokenResult.user_id) {
+                            instagramUserId = tokenResult.user_id;
+                            console.log('Instagram User ID (IG_ID) obtained from /me endpoint:', instagramUserId);
+                        }
+                        
+                        if (tokenResult.username) {
+                            username = tokenResult.username;
+                            console.log('Instagram Username obtained:', username);
+                        }
+                        
+                        if (title) {
+                            title.textContent = 'Token obtained!';
+                            title.style.color = '#E4405F';
+                        }
+                        if (message) {
+                            message.textContent = 'User information obtained successfully!';
+                        }
+                    } catch (tokenError) {
+                        console.error('Error exchanging code for token:', tokenError);
+                        throw new Error('Error exchanging code for token: ' + (tokenError.message || 'Unknown error'));
+                    }
+
+                    // Validate that we have IG_ID (user_id)
+                    if (!instagramUserId) {
+                        throw new Error('Instagram User ID (IG_ID) not found. Could not get user ID from /me endpoint.');
+                    }
+
+                    // For Instagram Business Login, IG_ID (user_id) is used as fbPageId and tokenAPI
+                    // We don't need to fetch Facebook page information
+                    const pageName = username || `Instagram - ${instagramUserId}`;
+
+                    console.log('=== INSTAGRAM INFORMATION OBTAINED ===');
+                    console.log('Instagram User ID (IG_ID) - will be used as fbPageId and tokenAPI:', instagramUserId);
+                    console.log('Username:', username || 'N/A');
+                    console.log('Long-lived Token obtained:', accessToken ? 'Yes' : 'No');
+                    console.log('=====================================');
+
+                    // Validate that we have IG_ID (user_id) and long-lived token
+                    if (!instagramUserId) {
+                        throw new Error('Instagram User ID (IG_ID) not found. Could not get user ID from /me endpoint.');
+                    }
+                    
+                    if (!accessToken) {
+                        throw new Error('Long-lived access token not available.');
+                    }
+
+                    // Hide spinner
+                    const spinnerElement2 = document.getElementById('spinner');
+                    if (spinnerElement2) spinnerElement2.style.display = 'none';
+
+                    // Update message after getting all data
+                    if (title) {
+                        title.textContent = 'Token obtained!';
+                        title.style.color = '#E4405F';
+                    }
+                    if (message) {
+                        message.textContent = 'Token obtained successfully. Click the button below to create the channel.';
+                        message.style.color = '#2e7d32';
+                    }
+
+                    // Show token and obtained data details
+                    const details = document.getElementById('details');
+                    if (details) {
+                        let detailsHtml = `
+                            <div class="details-item">
+                                <span class="details-label">Instagram User ID (IG_ID):</span> ${instagramUserId}
+                            </div>
+                        `;
+                        
+                        if (username) {
+                            detailsHtml += `<div class="details-item"><span class="details-label">Username:</span> ${username}</div>`;
+                        }
+                        
+                        detailsHtml += `<div class="details-item"><span class="details-label">Long-lived Token:</span> Obtained successfully (60 days)</div>`;
+                        
+                        details.innerHTML = detailsHtml;
+                        details.style.display = 'block';
+                    }
+
+                    // Show "Create Channel" button
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.textContent = 'Create Channel';
+                        backButton.style.display = 'block';
+                        backButton.onclick = async function() {
+                            // Disable button during creation
+                            backButton.disabled = true;
+                            backButton.textContent = 'Creating channel...';
+                            
+                            try {
+                                // Create channel
+                                // IMPORTANT: user_id (IG_ID) will be used as fbPageId and tokenAPI
+                                const channelResult = await createInstagramChannel(instagramUserId, pageName, accessToken, appData);
+                                
+                                // Update message after creating channel
+                                if (title) {
+                                    title.textContent = 'Configuring webhook...';
+                                }
+                                
+                                // Configure webhook if we have metaToken and tenantId
+                                if (metaToken && tenantId) {
+                                    try {
+                                        await configureWebhook(instagramUserId, accessToken, appData, metaToken, tenantId);
+                                        
+                                        if (message) {
+                                            message.textContent = 'Webhook configured successfully!';
+                                        }
+                                    } catch (webhookError) {
+                                        console.warn('Error configuring webhook:', webhookError);
+                                        // Don't block the process if webhook fails
+                                        if (message) {
+                                            message.textContent = 'Channel created, but there was a warning when configuring the webhook.';
+                                        }
+                                    }
+                                }
+                                
+                                // Success - update message and redirect
+                                if (title) {
+                                    title.innerHTML = '<span class="success-icon">✓</span><br>Instagram Channel Created!';
+                                    title.style.color = '#2e7d32';
+                                }
+                                if (message) {
+                                    message.textContent = 'Channel created successfully! Redirecting...';
+                                    message.style.color = '#2e7d32';
+                                }
+                                
+                                // Update details with channel ID
+                                if (details) {
+                                    let detailsHtml = `
+                                        <div class="details-item">
+                                            <span class="details-label">Instagram User ID (IG_ID):</span> ${instagramUserId}
+                                        </div>
+                                    `;
+                                    
+                                    if (username) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Username:</span> ${username}</div>`;
+                                    }
+                                    
+                                    if (channelResult && channelResult.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.id}</div>`;
+                                    } else if (channelResult && channelResult.data && channelResult.data.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.data.id}</div>`;
+                                    } else if (channelResult && channelResult.data && channelResult.data.whatsapp && channelResult.data.whatsapp.id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Channel ID:</span> ${channelResult.data.whatsapp.id}</div>`;
+                                    }
+                                    
+                                    detailsHtml += `<div class="details-item"><span class="details-label">Status:</span> CONNECTED</div>`;
+                                    
+                                    details.innerHTML = detailsHtml;
+                                }
+                                
+                                console.log('=== PROCESS COMPLETED SUCCESSFULLY ===');
+                                console.log('Instagram User ID (IG_ID):', instagramUserId);
+                                console.log('Username:', username || 'N/A');
+                                console.log('Channel created:', channelResult);
+                                console.log('=====================================');
+                                
+                                // Mark that processing was completed successfully
+                                hasProcessedOAuth = true;
+                                isProcessingOAuth = false;
+                                
+                                // Redirect after 2 seconds
+                                setTimeout(function() {
+                                    window.location.href = '/#/configuracoes/meta?instagramSuccess=true&instagramUserId=' + instagramUserId;
+                                }, 2000);
+                            } catch (error) {
+                                console.error('Error creating channel:', error);
+                                
+                                // Show error
+                                if (title) {
+                                    title.textContent = 'Error creating channel';
+                                    title.style.color = '#d32f2f';
+                                }
+                                if (message) {
+                                    message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                    message.style.color = '#d32f2f';
+                                }
+                                
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                    errorDiv.style.display = 'block';
+                                }
+                                
+                                // Re-enable button and change text
+                                backButton.disabled = false;
+                                backButton.textContent = 'Back to Settings';
+                                backButton.onclick = function() {
+                                    window.location.href = '/#/configuracoes/meta?instagramError=' + encodeURIComponent(error.message || 'Error creating channel');
+                                };
+                            }
+                        };
+                    }
+
+                    // Mark that processing was completed (but channel hasn't been created yet)
+                    hasProcessedOAuth = true;
+                    isProcessingOAuth = false;
+
+                } catch (error) {
+                    console.error('Error processing Instagram OAuth:', error);
+                    
+                    // Mark that processing was completed (even with error)
+                    hasProcessedOAuth = true;
+                    isProcessingOAuth = false;
+                    
+                    // Hide spinner
+                    const spinnerEl = document.getElementById('spinner');
+                    if (spinnerEl) spinnerEl.style.display = 'none';
+                    
+                    // Show error
+                    const title = document.getElementById('title');
+                    if (title) {
+                        title.textContent = 'Error';
+                        title.style.color = '#d32f2f';
+                    }
+                    
+                    const message = document.getElementById('message');
+                    if (message) {
+                        message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                        message.style.color = '#d32f2f';
+                    }
+                    
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                        errorDiv.style.display = 'block';
+                    }
+                    
+                    // Show back button
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.style.display = 'block';
+                        backButton.textContent = 'Back to Settings';
+                        backButton.onclick = function() {
+                            window.location.href = '/#/configuracoes/meta?instagramError=' + encodeURIComponent(error.message || 'Error processing Instagram OAuth');
+                        };
+                    }
+                }
+            }
+
+            // Function to start OAuth flow
+            function startInstagramOAuth() {
+                // Check if we already have code (OAuth callback)
+                // If we already have code, do nothing here - will be processed by initializeOAuth
+                if (code) {
+                    console.log('Code already present in URL, startInstagramOAuth doesn\'t need to do anything (will be processed by initializeOAuth)');
+                    return;
+                }
+
+                // If there's an error, show and return
+                if (error) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = error_description || error_reason || error || 'Authorization error';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    const title = document.getElementById('title');
+                    if (title) {
+                        title.textContent = 'Error';
+                        title.style.color = '#d32f2f';
+                    }
+                    const message = document.getElementById('message');
+                    if (message) {
+                        message.textContent = 'Instagram authorization error';
+                        message.style.color = '#d32f2f';
+                    }
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.style.display = 'block';
+                    }
+                    return;
+                }
+
+                // If we don't have code or error, start OAuth flow
+                if (!clientId) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Client ID not found. Please start the flow from the settings page.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    setTimeout(() => {
+                        window.location.href = '/#/configuracoes/meta?error=missing_client_id';
+                    }, 3000);
+                    return;
+                }
+
+                // Get app data
+                const appData = getAppData();
+                if (!appData || !appData.appId) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'App data not found. Please start the flow from the settings page.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    setTimeout(() => {
+                        window.location.href = '/#/configuracoes/meta?error=missing_app_data';
+                    }, 3000);
+                    return;
+                }
+
+                // Construir URL de autorização OAuth do Instagram
+                // IMPORTANTE: Para Instagram Business Login, usar Instagram App ID (appInstagramId)
+                // O Instagram App ID está em: App Dashboard > Instagram > API setup with Instagram login > 
+                // 3. Set up Instagram business login > Business login settings > Instagram App ID
+                // Referência: https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/business-login
+                // IMPORTANTE: O redirect_uri deve ser exatamente o mesmo usado no exchange
+                const redirectUri = getRedirectUri();
+                const encodedRedirectUri = encodeURIComponent(redirectUri);
+                const responseType = 'code';
+                const scopes = [
+                    'instagram_business_basic',
+                    'instagram_business_manage_messages',
+                    'instagram_business_manage_comments',
+                    'instagram_business_content_publish',
+                    'instagram_business_manage_insights'
+                ].join('%2C');
+                
+                // Para Instagram Business Login, usar Instagram App ID (appInstagramId)
+                // IMPORTANTE: appData.appId contém o appInstagramId (salvo pelo ConfiguracoesMeta.vue)
+                // Priorizar appData.appId (appInstagramId) sobre clientId
+                const instagramAppId = appData?.appId || clientId;
+                
+                if (!instagramAppId) {
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Instagram App ID not found. Make sure the app is configured with Instagram Business Login and that the Instagram App ID is correct in the App Dashboard.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinner = document.getElementById('spinner');
+                    if (spinner) spinner.style.display = 'none';
+                    setTimeout(() => {
+                        window.location.href = '/#/configuracoes/meta?error=missing_instagram_app_id';
+                    }, 3000);
+                    return;
+                }
+                
+                const instagramAuthUrl = `https://www.instagram.com/oauth/authorize?client_id=${instagramAppId}&redirect_uri=${encodedRedirectUri}&response_type=${responseType}&scope=${scopes}`;
+                
+                console.log('=== STARTING INSTAGRAM OAuth FLOW ===');
+                console.log('Instagram App ID (appInstagramId):', instagramAppId);
+                console.log('Client ID (from URL):', clientId);
+                console.log('App Data App ID (appInstagramId):', appData?.appId || 'Not configured');
+                console.log('Redirect URI:', redirectUri);
+                console.log('Authorization URL:', instagramAuthUrl.replace(instagramAppId, 'INSTAGRAM_APP_ID'));
+                console.log('NOTE: appData.appId contains the appInstagramId configured in App WABA');
+                console.log('=====================================');
+
+                // Update message
+                const title = document.getElementById('title');
+                const message = document.getElementById('message');
+                if (title) title.textContent = 'Opening Instagram authorization...';
+                if (message) message.textContent = 'Please wait while we open the Instagram authorization page.';
+
+                // Abrir popup do Instagram OAuth (similar ao Facebook Embedded Signup)
+                // Usar instagramAppId na URL
+                const popup = window.open(
+                    instagramAuthUrl,
+                    'instagram-oauth',
+                    'width=600,height=700,scrollbars=yes,resizable=yes'
+                );
+                
+                if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+                    console.error('Popup blocked by browser!');
+                    const errorDiv = document.getElementById('error');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Popup blocked by browser. Please allow popups for this site.';
+                        errorDiv.style.display = 'block';
+                    }
+                    const spinnerEl = document.getElementById('spinner');
+                    if (spinnerEl) spinnerEl.style.display = 'none';
+                    if (title) {
+                        title.textContent = 'Popup blocked';
+                        title.style.color = '#d32f2f';
+                    }
+                    if (message) {
+                        message.textContent = 'Please allow popups for this site and try again.';
+                        message.style.color = '#d32f2f';
+                    }
+                    const backButton = document.getElementById('backButton');
+                    if (backButton) {
+                        backButton.style.display = 'block';
+                    }
+                    setTimeout(function() {
+                        window.location.href = '/#/configuracoes/meta?error=popup_blocked';
+                    }, 3000);
+                    return;
+                }
+                
+                console.log('Popup opened successfully');
+                
+                // Monitorar o popup para detectar quando ele redireciona para nossa URL
+                const checkPopupInterval = setInterval(function() {
+                    try {
+                        // Check if popup was closed
+                        if (popup.closed) {
+                            clearInterval(checkPopupInterval);
+                            console.log('Popup was closed by user');
+                            
+                            // Check if we already have code in current URL (may have been captured)
+                            const currentCode = new URLSearchParams(window.location.search).get('code');
+                            if (!currentCode) {
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Authorization canceled or popup closed.';
+                                    errorDiv.style.display = 'block';
+                                }
+                                const spinner = document.getElementById('spinner');
+                                if (spinner) spinner.style.display = 'none';
+                                if (title) {
+                                    title.textContent = 'Authorization canceled';
+                                    title.style.color = '#f57c00';
+                                }
+                                if (message) {
+                                    message.textContent = 'The popup was closed. Please try again.';
+                                    message.style.color = '#f57c00';
+                                }
+                                const backButton = document.getElementById('backButton');
+                                if (backButton) {
+                                    backButton.style.display = 'block';
+                                }
+                                setTimeout(function() {
+                                    window.location.href = '/#/configuracoes/meta?error=popup_closed';
+                                }, 2000);
+                            }
+                            return;
+                        }
+                        
+                        // Try to access popup URL (may generate CORS error, but we try)
+                        try {
+                            const popupUrl = popup.location.href;
+                            
+                            // If popup redirected to our URL, capture code and reload page
+                            if (popupUrl.includes(window.location.origin) && popupUrl.includes('instagram-oauth-callback.html')) {
+                                clearInterval(checkPopupInterval);
+                                
+                                const popupUrlObj = new URL(popupUrl);
+                                const code = popupUrlObj.searchParams.get('code');
+                                
+                                if (code) {
+                                    console.log('OAuth code captured from popup:', code.substring(0, 50) + '...');
+                                    
+                                    // Close popup
+                                    popup.close();
+                                    
+                                    // Update current URL with code and process
+                                    const currentUrl = new URL(window.location.href);
+                                    currentUrl.searchParams.set('code', code);
+                                    window.location.href = currentUrl.toString();
+                                }
+                            }
+                        } catch (e) {
+                            // CORS error accessing popup.location - normal, continue monitoring
+                            // Code will be captured when popup redirects to our page
+                        }
+                        } catch (e) {
+                            // Error checking popup - continue trying
+                        }
+                }, 500); // Verificar a cada 500ms
+                
+                // Limpar intervalo após 5 minutos (timeout)
+                setTimeout(function() {
+                    clearInterval(checkPopupInterval);
+                    if (!popup.closed) {
+                        popup.close();
+                    }
+                }, 300000); // 5 minutos
+            }
+
+            // Start processing when page loads
+            // Use a flag to ensure it runs only once
+            let hasInitialized = false;
+            
+            function initializeOAuth() {
+                console.log('=== initializeOAuth called ===');
+                console.log('hasInitialized:', hasInitialized);
+                console.log('document.readyState:', document.readyState);
+                console.trace('Initialization stack trace:');
+                
+                if (hasInitialized) {
+                    console.warn('⚠️ initializeOAuth has already been called. Ignoring.');
+                    return;
+                }
+                hasInitialized = true;
+                console.log('✅ Initializing OAuth...');
+                
+                if (code) {
+                    console.log('Code found, processing OAuth...');
+                    processInstagramOAuth();
+                } else {
+                    console.log('No code found, starting OAuth flow...');
+                    startInstagramOAuth();
+                }
+            }
+            
+            if (document.readyState === 'loading') {
+                console.log('Document still loading, waiting for DOMContentLoaded...');
+                document.addEventListener('DOMContentLoaded', initializeOAuth);
+            } else {
+                console.log('Document already loaded, initializing immediately...');
+                initializeOAuth();
+            }
+        })();
+    </script>
+</body>
+</html>
+

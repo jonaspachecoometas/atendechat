@@ -1,0 +1,1355 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Facebook Embedded Signup</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #1877f2;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            color: #d32f2f;
+            margin-top: 20px;
+        }
+        .success {
+            color: #2e7d32;
+            margin-top: 20px;
+        }
+        .success-icon {
+            color: #2e7d32;
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .back-button {
+            background-color: #1877f2;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background-color 0.3s;
+        }
+        .back-button:hover {
+            background-color: #1565c0;
+        }
+        .back-button:active {
+            background-color: #0d47a1;
+        }
+        .back-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .details {
+            background-color: #f5f5f5;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: left;
+            font-size: 14px;
+        }
+        .details-item {
+            margin: 8px 0;
+        }
+        .details-label {
+            font-weight: 600;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="spinner" class="spinner"></div>
+        <h3 id="title">Starting Facebook authorization...</h3>
+        <p id="message">Please wait while we process the Facebook authorization.</p>
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="success" class="success" style="display: none;"></div>
+        <div id="details" class="details" style="display: none;"></div>
+        <button id="backButton" class="back-button" style="display: none;" onclick="window.location.href='/#/configuracoes/meta'">
+            Back to Settings
+        </button>
+    </div>
+
+    <script>
+        (function() {
+            // CRÍTICO: Configurar listener do postMessage ANTES de qualquer coisa
+            // para garantir que capturamos mensagens que chegam rapidamente
+            let postMessageData = null;
+            let postMessageReceived = false;
+            let processEmbeddedSignupCallback = null; // Callback para processar quando código estiver disponível
+            let oauthCodeFromCallback = null; // Código OAuth recebido via callback do FB.login()
+            let fallbackRedirectUri = null; // fallback_redirect_uri capturado do OAuth dialog
+            let hasProcessed = false; // Flag para controlar se já processou
+            
+            console.log('=== CONFIGURANDO LISTENER DO POSTMESSAGE ===');
+            window.addEventListener('message', function(event) {
+                // Verificar origem da mensagem (aceita múltiplos domínios do Facebook)
+                const allowedOrigins = [
+                    'https://www.facebook.com',
+                    'https://web.facebook.com',
+                    'https://business.facebook.com'
+                ];
+                
+                if (!allowedOrigins.includes(event.origin)) {
+                    return;
+                }
+
+                try {
+                    // Tentar parsear como JSON
+                    let data;
+                    if (typeof event.data === 'string') {
+                        try {
+                            data = JSON.parse(event.data);
+                        } catch (e) {
+                            // Se não for JSON válido, pode ser um objeto já parseado ou outra coisa
+                            console.warn('PostMessage não é JSON válido, tentando usar como objeto:', event.data);
+                            return;
+                        }
+                    } else {
+                        data = event.data;
+                    }
+                    
+                    console.log('PostMessage recebido:', data);
+                    
+                    if (data && data.type === 'WA_EMBEDDED_SIGNUP') {
+                        console.log('PostMessage do Embedded Signup capturado:', data);
+                        postMessageData = data;
+                        postMessageReceived = true;
+                        
+                        // Se já temos o callback configurado, processar imediatamente
+                        if (processEmbeddedSignupCallback) {
+                            console.log('Callback disponível, processando postMessage imediatamente...');
+                            processEmbeddedSignupCallback(data);
+                        }
+                    }
+                } catch (error) {
+                    // Ignorar mensagens que não são JSON válido
+                    console.warn('Erro ao processar postMessage:', error, 'Data:', event.data);
+                }
+            });
+            console.log('Listener do postMessage configurado');
+            
+            // Capturar parâmetros da URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            const error = urlParams.get('error');
+            const error_reason = urlParams.get('error_reason');
+            const error_description = urlParams.get('error_description');
+            const state = urlParams.get('state');
+            
+            // Parâmetros para configurar o SDK e o login
+            const appId = urlParams.get('app_id');
+            const apiVersion = urlParams.get('api_version') || 'v24.0';
+            const configId = urlParams.get('config_id');
+            const tenantId = urlParams.get('tenantId');
+            const metaToken = urlParams.get('metaToken');
+
+            // Capturar também do hash (alguns fluxos OAuth usam hash)
+            const hashParams = new URLSearchParams(window.location.hash.substring(1));
+            const hashCode = hashParams.get('code');
+            const hashError = hashParams.get('error');
+
+            // Usar código do query string, hash ou callback do FB.login()
+            let authCode = code || hashCode || oauthCodeFromCallback;
+            const authError = error || hashError || error_reason;
+            
+            console.log('Parâmetros capturados:', { 
+                authCode: !!authCode, 
+                authError, 
+                appId, 
+                configId,
+                codeFromUrl: !!code,
+                codeFromHash: !!hashCode,
+                codeFromCallback: !!oauthCodeFromCallback
+            });
+
+                            // Função para obter dados do app do localStorage (passados pela aplicação Vue)
+                            function getAppData() {
+                    try {
+                        const appDataStr = localStorage.getItem('embeddedSignupAppData');
+                        if (appDataStr) {
+                            return JSON.parse(appDataStr);
+                        }
+                    } catch (e) {
+                        console.warn('Erro ao obter dados do app do localStorage:', e);
+                    }
+                    return null;
+                }
+                
+                // Função para obter token de autenticação
+                function getAuthToken() {
+                    try {
+                        const tokenStr = localStorage.getItem('token');
+                        if (tokenStr) {
+                            const token = JSON.parse(tokenStr);
+                            return token;
+                        }
+                    } catch (e) {
+                        console.warn('Erro ao obter token do localStorage:', e);
+                    }
+                    return null;
+                }
+                
+                // Função auxiliar para obter URL da API (similar ao gmailOAuth2.js)
+                function getApiUrl() {
+                    let apiUrl = '';
+                    try {
+                        // Tentar obter do localStorage (passado pela aplicação Vue)
+                        const apiUrlStr = localStorage.getItem('windowOrigin');
+                        if (apiUrlStr && apiUrlStr !== 'undefined' && apiUrlStr !== '') {
+                            apiUrl = apiUrlStr;
+                        } else {
+                            // Estratégia 1: Em desenvolvimento, tentar usar proxy '/api'
+                            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                                // Tentar porta padrão do backend primeiro
+                                apiUrl = window.location.origin.replace(/:\d+/, ':3101');
+                            } else {
+                                // Em produção, usar a mesma origem (backend e frontend no mesmo domínio)
+                                apiUrl = window.location.origin;
+                            }
+                        }
+                    } catch (e) {
+                        apiUrl = window.location.origin;
+                    }
+                    
+                    // Se URL_API for relativa (começa com /), usar como proxy
+                    if (apiUrl && apiUrl.startsWith('/')) {
+                        apiUrl = window.location.origin + apiUrl;
+                    }
+                    
+                    // Garantir que a URL não tenha barra no final
+                    apiUrl = apiUrl.replace(/\/$/, '');
+                    
+                    return apiUrl;
+                }
+                
+                // Função para fazer chamada à API
+                async function callAPI(endpoint, method, data) {
+                    const token = getAuthToken();
+                    if (!token) {
+                        throw new Error('Authentication token not found');
+                    }
+                    
+                    const apiUrl = localStorage.getItem('apiUrl');
+                    const url = apiUrl + endpoint;
+                    
+                    const options = {
+                        method: method,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ' + token
+                        }
+                    };
+                    
+                    if (data && (method === 'POST' || method === 'PUT')) {
+                        options.body = JSON.stringify(data);
+                    }
+                    
+                    // Log detalhado para debug do webhook
+                    if (endpoint === '/wabametaOverrideCallbackUrl') {
+                        console.log('=== CHAMADA API: wabametaOverrideCallbackUrl ===');
+                        console.log('URL completa:', url);
+                        console.log('Method:', method);
+                        console.log('Headers:', options.headers);
+                        console.log('Body:', options.body);
+                        console.log('Dados parseados:', data);
+                        console.log('==============================================');
+                    }
+                    
+                    const response = await fetch(url, options);
+                    const responseData = await response.json();
+                    
+                    if (!response.ok) {
+                        // Log detalhado do erro
+                        if (endpoint === '/wabametaOverrideCallbackUrl') {
+                            console.error('=== ERRO NA RESPOSTA DA API ===');
+                            console.error('Status:', response.status);
+                            console.error('Status Text:', response.statusText);
+                            console.error('Response Data:', responseData);
+                            console.error('URL:', url);
+                            console.error('================================');
+                        }
+                        throw new Error(responseData.error || responseData.message || 'Request error');
+                    }
+                    
+                    return responseData;
+                }
+                
+                // Função para trocar código por business token via backend (evita CORS)
+                async function exchangeCodeForToken(code, appData, redirectUri) {
+                    console.log('=== TROCANDO CÓDIGO POR BUSINESS TOKEN ===');
+                    console.log('Código:', code.substring(0, 50) + '...');
+                    console.log('App ID:', appData.appId);
+                    
+                    // CRÍTICO: O Facebook vincula o código OAuth ao redirect_uri EXATO usado no dialog OAuth.
+                    // Se o dialog usou query parameters, o código está vinculado a esse redirect_uri COM os parâmetros.
+                    // Portanto, devemos usar o redirect_uri EXATO do dialog (fallback_redirect_uri) se disponível.
+                    //
+                    // IMPORTANTE: A URL BASE (sem query params) deve estar na lista "Valid OAuth Redirect URIs"
+                    // no Dashboard, mas o redirect_uri usado na troca deve ser IDÊNTICO ao usado no dialog.
+                    // 
+                    // NOTA: Mesmo que tenhamos especificado fallback_redirect_uri sem query params, o Facebook SDK
+                    // pode ainda usar a URL original com query params. Portanto, devemos usar o redirect_uri
+                    // exato capturado do dialog para garantir correspondência.
+                    const redirectUriToUse = fallbackRedirectUri || redirectUri;
+                    
+                    console.log('=== REDIRECT URI PARA TROCA DO CÓDIGO ===');
+                    console.log('Redirect URI padrão (base, sem query params):', redirectUri);
+                    console.log('fallback_redirect_uri capturado do dialog:', fallbackRedirectUri);
+                    console.log('Redirect URI FINAL a ser usado (DEVE ser idêntico ao do dialog):', redirectUriToUse);
+                    console.log('IMPORTANTE: O redirect_uri deve ser IDÊNTICO ao usado no dialog OAuth.');
+                    console.log('Se o dialog usou query parameters, este redirect_uri também deve tê-los.');
+                    console.log('A URL base (sem query params) deve estar na lista "Valid OAuth Redirect URIs" no Dashboard.');
+                    console.log('API Version:', appData.apiVersion || 'v24.0');
+                    console.log('==========================================');
+                    
+                    try {
+                        // Usar endpoint do backend para evitar problemas de CORS
+                        const result = await callAPI('/wabametaExchangeEmbeddedSignupCode/', 'POST', {
+                            code: code,
+                            appId: appData.appId,
+                            appSecret: appData.appSecret,
+                            redirectUri: redirectUriToUse,
+                            apiVersion: appData.apiVersion || 'v24.0'
+                        });
+                        
+                        console.log('Resposta do backend:', result);
+                        
+                        if (result && result.access_token) {
+                            console.log('Business token obtido com sucesso!');
+                            console.log('Token (primeiros 50 chars):', result.access_token.substring(0, 50) + '...');
+                            return result.access_token;
+                        }
+                        
+                        throw new Error('Token not returned in response');
+                    } catch (error) {
+                        console.error('Erro ao trocar código por token:', error);
+                        throw error;
+                    }
+                }
+                
+                // Função para obter dados da conta WABA via backend
+                async function getWABAData(wabaId, businessToken, appData) {
+                    console.log('=== OBTENDO DADOS DA CONTA WABA ===');
+                    console.log('WABA ID:', wabaId);
+                    
+                    try {
+                        const token = getAuthToken();
+                        if (!token) {
+                            throw new Error('Authentication token not found');
+                        }
+                        
+                        const apiUrl = localStorage.getItem('apiUrl');
+                        const url = `${apiUrl}/wabametaGetWABAData`;
+                        
+                        console.log('Fazendo requisição para:', url);
+                        
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + token
+                            },
+                            body: JSON.stringify({
+                                wabaId: wabaId,
+                                businessToken: businessToken,
+                                apiVersion: appData.apiVersion || 'v24.0',
+                                fields: 'id,name,currency,owner_business_info'
+                            })
+                        });
+                        
+                        const data = await response.json();
+                        console.log('Resposta do backend (WABA data):', data);
+                        
+                        if (!response.ok || data.error) {
+                            const errorMsg = data.error || data.message || `Erro HTTP ${response.status}`;
+                            console.error('Erro ao obter dados da WABA:', errorMsg);
+                            throw new Error(errorMsg);
+                        }
+                        
+                        return data;
+                    } catch (error) {
+                        console.error('Erro ao obter dados da conta WABA:', error);
+                        throw error;
+                    }
+                }
+                
+                // Função para buscar phone_number_id via backend
+                async function getPhoneNumberId(wabaId, businessToken, appData) {
+                    console.log('=== BUSCANDO PHONE NUMBER ID ===');
+                    console.log('WABA ID:', wabaId);
+                    
+                    try {
+                        const token = getAuthToken();
+                        if (!token) {
+                            throw new Error('Authentication token not found');
+                        }
+                        
+                        const apiUrl = localStorage.getItem('apiUrl');
+                        const url = `${apiUrl}/wabametaGetWABAPhoneNumbers`;
+                        
+                        console.log('Fazendo requisição para:', url);
+                        
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + token
+                            },
+                            body: JSON.stringify({
+                                wabaId: wabaId,
+                                businessToken: businessToken,
+                                apiVersion: appData.apiVersion || 'v24.0',
+                                fields: 'id,cc,country_dial_code,display_phone_number,verified_name,status,quality_rating,search_visibility,platform_type,code_verification_status'
+                            })
+                        });
+                        
+                        const data = await response.json();
+                        console.log('Resposta do backend (phone_numbers):', data);
+                        
+                        if (!response.ok || data.error) {
+                            const errorMsg = data.error || data.message || `Erro HTTP ${response.status}`;
+                            console.error('Erro ao obter números de telefone:', errorMsg);
+                            throw new Error(errorMsg);
+                        }
+                        
+                        // A resposta do backend deve ter a mesma estrutura da Graph API
+                        if (data && data.data && data.data.length > 0) {
+                            const phoneNumberId = data.data[0].id;
+                            const phoneNumberData = data.data[0];
+                            console.log('Phone Number ID encontrado:', phoneNumberId);
+                            console.log('Dados completos do número:', phoneNumberData);
+                            return { phoneNumberId, phoneNumberData };
+                        }
+                        
+                        throw new Error('No phone number found for this WABA');
+                    } catch (error) {
+                        console.error('Erro ao buscar phone_number_id:', error);
+                        throw error;
+                    }
+                }
+                
+                // Função para criar canal
+                async function createChannel(wabaId, phoneNumberId, businessToken, appData) {
+                    console.log('Criando canal...', { wabaId, phoneNumberId });
+                    try {
+                        // Se não tiver business token, usar o token do app
+                        const tokenToUse = businessToken || appData.token;
+                        
+                        if (!tokenToUse) {
+                            throw new Error('No token available to create the channel');
+                        }
+                        
+                        // Sanitizar wabaVersion
+                        let wabaVersion = appData.apiVersion || 'v24.0';
+                        if (wabaVersion.startsWith('v') || wabaVersion.startsWith('V')) {
+                            wabaVersion = wabaVersion.substring(1);
+                        }
+                        
+                        const channelData = {
+                            name: `WABA ${wabaId} - ${phoneNumberId || 'N/A'}`,
+                            type: 'waba',
+                            tokenAPI: phoneNumberId || '',
+                            wabaId: wabaId,
+                            bmToken: tokenToUse,
+                            wabaVersion: wabaVersion,
+                            status: 'CONNECTED',
+                            isDefault: false
+                        };
+                        
+                        const result = await callAPI('/whatsapp', 'POST', channelData);
+                        console.log('Canal criado com sucesso:', result);
+                        
+                        // Obter dados do tenant para configurar webhook
+                        try {
+                            // Obter tenantId do localStorage
+                            // let tenantId = null;
+                            // try {
+                            //     const usuarioStr = localStorage.getItem('usuario');
+                            //     if (usuarioStr) {
+                            //         const usuario = JSON.parse(usuarioStr);
+                            //         tenantId = usuario?.tenantId;
+                            //     }
+                            // } catch (e) {
+                            //     console.warn('Erro ao obter tenantId do localStorage:', e);
+                            // }
+                            
+                            if (tenantId) {
+                                // Buscar metaToken do tenant
+                                // let metaToken = null;
+                                if(!metaToken) {
+                                    try {
+                                        const tenantResponse = await callAPI(`/tenants/${tenantId}`, 'GET');
+                                        // A resposta vem como { data: [...] } conforme visto em ConfiguracoesMeta.vue
+                                        if (tenantResponse && tenantResponse.data && Array.isArray(tenantResponse.data) && tenantResponse.data.length > 0) {
+                                            metaToken = tenantResponse.data[0].metaToken;
+                                        }
+                                    } catch (e) {
+                                        console.warn('Erro ao obter metaToken do tenant:', e);
+                                    }
+                                }
+                                
+                                // Configurar webhook se tiver metaToken e tenantId
+                                if (metaToken && tenantId) {
+                                    try {
+                                        const apiUrl = localStorage.getItem('apiUrl');
+                                        const callbackUrl = `${process.env.URL_API}/metaWebhook/${tenantId}`;
+                                        
+                                        // Sanitizar wabaVersion para o webhook (REMOVER o 'v' porque o serviço já adiciona)
+                                        let webhookWabaVersion = appData.apiVersion || 'v23.0';
+                                        if (webhookWabaVersion.startsWith('v') || webhookWabaVersion.startsWith('V')) {
+                                            // Remover o 'v' porque o serviço OverrideCallbackUrl já adiciona na URL
+                                            webhookWabaVersion = webhookWabaVersion.substring(1);
+                                        }
+                                        
+                                        const webhookData = {
+                                            wabaId: wabaId,
+                                            wabaVersion: webhookWabaVersion,
+                                            wabaToken: tokenToUse,
+                                            overrideCallbackUri: callbackUrl,
+                                            verifyToken: metaToken
+                                        };
+                                        
+                                        console.log('=== DADOS PARA CONFIGURAR WEBHOOK ===');
+                                        console.log('wabaId:', webhookData.wabaId);
+                                        console.log('wabaVersion:', webhookData.wabaVersion);
+                                        console.log('wabaToken (primeiros 50 chars):', webhookData.wabaToken ? webhookData.wabaToken.substring(0, 50) + '...' : 'null');
+                                        console.log('overrideCallbackUri:', webhookData.overrideCallbackUri);
+                                        console.log('verifyToken (primeiros 20 chars):', webhookData.verifyToken ? webhookData.verifyToken.substring(0, 20) + '...' : 'null');
+                                        console.log('tenantId:', tenantId);
+                                        console.log('apiUrl:', apiUrl);
+                                        console.log('Dados completos:', JSON.stringify(webhookData, null, 2));
+                                        console.log('=====================================');
+                                        
+                                        await callAPI('/wabametaOverrideCallbackUrl', 'POST', webhookData);
+                                        console.log('Webhook configurado com sucesso para o canal');
+                                    } catch (webhookError) {
+                                        console.error('=== ERRO AO CONFIGURAR WEBHOOK ===');
+                                        console.error('Erro completo:', webhookError);
+                                        console.error('Mensagem:', webhookError.message);
+                                        if (webhookError.response) {
+                                            console.error('Response status:', webhookError.response?.status);
+                                            console.error('Response data:', webhookError.response?.data);
+                                        }
+                                        console.error('===================================');
+                                        // Não bloquear a criação se a configuração do webhook falhar
+                                    }
+                                } else {
+                                    console.warn('metaToken ou tenantId não disponível para configurar webhook');
+                                }
+                            } else {
+                                console.warn('tenantId não encontrado no localStorage');
+                            }
+                        } catch (error) {
+                            console.warn('Erro ao processar configuração do webhook:', error);
+                            // Não bloquear a criação do canal se houver erro
+                        }
+                        
+                        return result;
+                    } catch (error) {
+                        console.error('Error creating channel:', error);
+                        throw error;
+                    }
+                }
+                
+                // Função para processar o fluxo completo
+                async function processEmbeddedSignup(embeddedSignupData) {
+                    if (hasProcessed) return;
+                    hasProcessed = true;
+                    
+                    try {
+                        // Atualizar mensagem na tela
+                        const title = document.getElementById('title');
+                        const message = document.getElementById('message');
+                        if (title) title.textContent = 'Processing...';
+                        if (message) message.textContent = 'Please wait while we exchange the token and create the channel.';
+                        
+                        // Obter dados do app
+                        const appData = getAppData();
+                        if (!appData || !appData.appId || !appData.appSecret) {
+                            throw new Error('App data not found. Please start the flow from the settings page.');
+                        }
+                        
+                        // Verificar se o evento é FINISH ou FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING
+                        const isFinishEvent = embeddedSignupData && 
+                            (embeddedSignupData.event === 'FINISH' || 
+                             embeddedSignupData.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING');
+                        
+                        // Os dados estão em embeddedSignupData.data
+                        const embeddedData = embeddedSignupData.data || embeddedSignupData;
+                        
+                        console.log('=== PROCESSANDO EMBEDDED SIGNUP ===');
+                        console.log('Dados completos do Embedded Signup:', embeddedSignupData);
+                        console.log('Dados extraídos (data):', embeddedData);
+                        console.log('É evento FINISH?', isFinishEvent);
+                        console.log('WABA ID:', embeddedData?.waba_id);
+                        console.log('Phone Number ID:', embeddedData?.phone_number_id);
+                        
+                        if (isFinishEvent && embeddedData && embeddedData.waba_id) {
+                            const waba_id = embeddedData.waba_id;
+                            let phone_number_id = embeddedData.phone_number_id;
+                            
+                            console.log('Processando FINISH com WABA ID:', waba_id);
+                            console.log('Phone Number ID inicial:', phone_number_id || 'não fornecido - será buscado via API');
+                            
+                            // Construir redirectUri padrão
+                            // CRÍTICO: O redirect_uri usado na troca deve ser IDÊNTICO ao usado no dialog OAuth.
+                            // Se o fallback_redirect_uri foi capturado do dialog, ele será usado (pode ter query params).
+                            // Caso contrário, usar a URL atual com query parameters (se tiver), pois o Facebook
+                            // pode ter usado essa URL no dialog. A URL base (sem query params) DEVE estar na lista.
+                            let redirectUri = window.location.origin + '/facebook-embedded-signup.html';
+                            
+                            // Se não capturamos o fallback_redirect_uri, tentar usar a URL atual com query params
+                            // pois o Facebook pode ter usado essa URL no dialog
+                            if (!fallbackRedirectUri && window.location.search) {
+                                redirectUri = window.location.origin + window.location.pathname + window.location.search;
+                                console.log('Usando URL atual com query params como redirectUri (fallback_redirect_uri não capturado):', redirectUri);
+                            } else {
+                                console.log('RedirectUri padrão (fallback):', redirectUri);
+                                console.log('fallback_redirect_uri capturado?', !!fallbackRedirectUri);
+                                if (fallbackRedirectUri) {
+                                    console.log('fallback_redirect_uri será usado:', fallbackRedirectUri);
+                                }
+                            }
+                            
+                            // Usar código do callback se disponível, senão usar da URL
+                            const codeToUse = oauthCodeFromCallback || authCode;
+                            if (!codeToUse) {
+                                throw new Error('OAuth code not found. Please try again.');
+                            }
+                            
+                            console.log('Usando código OAuth:', codeToUse.substring(0, 50) + '...');
+                            console.log('Origem do código:', oauthCodeFromCallback ? 'callback do FB.login()' : 'URL');
+                            
+                            // Ocultar spinner
+                            const spinner = document.getElementById('spinner');
+                            if (spinner) spinner.style.display = 'none';
+                            
+                            // Atualizar mensagem
+                            const title = document.getElementById('title');
+                            const message = document.getElementById('message');
+                            if (title) {
+                                title.textContent = 'Token received!';
+                                title.style.color = '#1877f2';
+                            }
+                            if (message) {
+                                message.textContent = 'Waiting for token exchange...';
+                            }
+                            
+                            // Trocar código por business token
+                            let businessToken = null;
+                            let wabaData = null;
+                            let phoneNumberData = null;
+                            
+                            // Log para debug: verificar se fallback_redirect_uri está disponível
+                            console.log('=== ANTES DE TROCAR CÓDIGO POR TOKEN ===');
+                            console.log('fallback_redirect_uri disponível?', !!fallbackRedirectUri);
+                            console.log('fallback_redirect_uri valor:', fallbackRedirectUri);
+                            console.log('redirectUri padrão:', redirectUri);
+                            console.log('redirectUri que será usado:', fallbackRedirectUri || redirectUri);
+                            
+                            try {
+                                businessToken = await exchangeCodeForToken(codeToUse, appData, redirectUri);
+                                
+                                // Atualizar mensagem após trocar token
+                                if (message) {
+                                    message.textContent = 'Getting account data...';
+                                }
+                                
+                                // Obter dados da conta WABA
+                                try {
+                                    console.log('Obtendo dados da conta WABA...');
+                                    wabaData = await getWABAData(waba_id, businessToken, appData);
+                                    console.log('Dados da conta WABA obtidos:', wabaData);
+                                } catch (wabaError) {
+                                    console.warn('Não foi possível obter dados da conta WABA:', wabaError);
+                                    // Continuar mesmo sem os dados completos
+                                }
+                                
+                                // Se não tiver phone_number_id, buscar via API
+                                if (!phone_number_id && businessToken) {
+                                    console.log('Phone Number ID não fornecido, buscando via Graph API...');
+                                    if (message) {
+                                        message.textContent = 'Searching for phone number...';
+                                    }
+                                    try {
+                                        const phoneResult = await getPhoneNumberId(waba_id, businessToken, appData);
+                                        phone_number_id = phoneResult.phoneNumberId;
+                                        phoneNumberData = phoneResult.phoneNumberData;
+                                        console.log('Phone Number ID obtido via API:', phone_number_id);
+                                        console.log('Dados completos do número:', phoneNumberData);
+                                    } catch (phoneError) {
+                                        console.warn('Não foi possível buscar phone_number_id:', phoneError);
+                                        // Continuar mesmo sem phone_number_id - pode ser criado depois
+                                    }
+                                } else if (phone_number_id && businessToken) {
+                                    // Se já tiver phone_number_id, buscar os dados completos do número
+                                    try {
+                                        const phoneResult = await getPhoneNumberId(waba_id, businessToken, appData);
+                                        phoneNumberData = phoneResult.phoneNumberData;
+                                        console.log('Dados completos do número obtidos:', phoneNumberData);
+                                    } catch (phoneError) {
+                                        console.warn('Não foi possível obter dados completos do número:', phoneError);
+                                    }
+                                }
+                                
+                                // Atualizar mensagem após obter todos os dados
+                                if (title) {
+                                    title.textContent = 'Token exchanged!';
+                                    title.style.color = '#2e7d32';
+                                }
+                                if (message) {
+                                    message.textContent = 'Token exchanged successfully. Click the button below to create the channel.';
+                                    message.style.color = '#2e7d32';
+                                }
+                                
+                                // Mostrar detalhes do token e dados obtidos
+                                const details = document.getElementById('details');
+                                if (details) {
+                                    let detailsHtml = `
+                                        <div class="details-item">
+                                            <span class="details-label">WABA ID:</span> ${waba_id}
+                                        </div>
+                                    `;
+                                    
+                                    if (wabaData) {
+                                        if (wabaData.name) {
+                                            detailsHtml += `<div class="details-item"><span class="details-label">Account Name:</span> ${wabaData.name}</div>`;
+                                        }
+                                        if (wabaData.currency) {
+                                            detailsHtml += `<div class="details-item"><span class="details-label">Currency:</span> ${wabaData.currency}</div>`;
+                                        }
+                                    }
+                                    
+                                    if (phone_number_id) {
+                                        detailsHtml += `<div class="details-item"><span class="details-label">Phone Number ID:</span> ${phone_number_id}</div>`;
+                                    }
+                                    
+                                    if (phoneNumberData) {
+                                        if (phoneNumberData.display_phone_number) {
+                                            detailsHtml += `<div class="details-item"><span class="details-label">Phone Number:</span> ${phoneNumberData.display_phone_number}</div>`;
+                                        }
+                                        if (phoneNumberData.verified_name) {
+                                            detailsHtml += `<div class="details-item"><span class="details-label">Verified Name:</span> ${phoneNumberData.verified_name}</div>`;
+                                        }
+                                        if (phoneNumberData.status) {
+                                            detailsHtml += `<div class="details-item"><span class="details-label">Status:</span> ${phoneNumberData.status}</div>`;
+                                        }
+                                    }
+                                    
+                                    detailsHtml += `<div class="details-item"><span class="details-label">Business Token:</span> Obtained successfully</div>`;
+                                    
+                                    details.innerHTML = detailsHtml;
+                                    details.style.display = 'block';
+                                }
+                                
+                                // Mostrar botão "Criar Canal"
+                                const backButton = document.getElementById('backButton');
+                                if (backButton) {
+                                    backButton.textContent = 'Create Channel';
+                                    backButton.style.display = 'block';
+                                    backButton.onclick = async function() {
+                                        // Desabilitar botão durante criação
+                                        backButton.disabled = true;
+                                        backButton.textContent = 'Criando canal...';
+                                        
+                                        try {
+                                            const channelResult = await createChannel(waba_id, phone_number_id, businessToken, appData);
+                                            
+                                            // Sucesso - atualizar mensagem e redirecionar
+                                            if (title) {
+                                                title.innerHTML = '<span class="success-icon">✓</span><br>Canal criado!';
+                                                title.style.color = '#2e7d32';
+                                            }
+                                            if (message) {
+                                                message.textContent = 'Canal criado com sucesso! Redirecionando...';
+                                                message.style.color = '#2e7d32';
+                                            }
+                                            
+                                            // Atualizar detalhes com ID do canal
+                                            if (details) {
+                                                details.innerHTML = `
+                                                    <div class="details-item">
+                                                        <span class="details-label">WABA ID:</span> ${waba_id}
+                                                    </div>
+                                                    <div class="details-item">
+                                                        <span class="details-label">Phone Number ID:</span> ${phone_number_id}
+                                                    </div>
+                                                    <div class="details-item">
+                                                        <span class="details-label">Business Token:</span> Obtained successfully
+                                                    </div>
+                                                    <div class="details-item">
+                                                        <span class="details-label">Channel ID:</span> ${channelResult?.id || channelResult?.data?.id || channelResult?.data?.whatsapp?.id || 'N/A'}
+                                                    </div>
+                                                `;
+                                            }
+                                            
+                                            console.log('=== PROCESSO CONCLUÍDO COM SUCESSO ===');
+                                            console.log('WABA ID:', waba_id);
+                                            console.log('Phone Number ID:', phone_number_id);
+                                            console.log('Business Token obtido:', !!businessToken);
+                                            console.log('Canal criado:', channelResult);
+                                            console.log('=====================================');
+                                            
+                                            // Redirecionar após 2 segundos
+                                            setTimeout(function() {
+                                                window.location.href = '/#/configuracoes/meta?embeddedSignupSuccess=true&waba_id=' + waba_id + '&phone_number_id=' + phone_number_id;
+                                            }, 2000);
+                                        } catch (error) {
+                                            console.error('Error creating channel:', error);
+                                            
+                                            // Mostrar erro
+                                            if (title) {
+                                                title.textContent = 'Error creating channel';
+                                                title.style.color = '#d32f2f';
+                                            }
+                                            if (message) {
+                                                message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                                message.style.color = '#d32f2f';
+                                            }
+                                            
+                                            const errorDiv = document.getElementById('error');
+                                            if (errorDiv) {
+                                                errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                                errorDiv.style.display = 'block';
+                                            }
+                                            
+                                            // Reabilitar botão e mudar texto
+                                            backButton.disabled = false;
+                                            backButton.textContent = 'Back to Settings';
+                                            backButton.onclick = function() {
+                                                window.location.href = '/#/configuracoes/meta?embeddedSignupError=' + encodeURIComponent(error.message || 'Error creating channel');
+                                            };
+                                        }
+                                    };
+                                }
+                            } catch (error) {
+                                console.error('Erro ao trocar token:', error);
+                                
+                                // Mostrar erro mas permitir criar canal com token do app
+                                if (title) {
+                                    title.textContent = 'Warning';
+                                    title.style.color = '#f57c00';
+                                }
+                                if (message) {
+                                    message.textContent = 'Unable to exchange token. You can create the channel using the app token.';
+                                    message.style.color = '#f57c00';
+                                }
+                                
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Warning: ' + (error.message || 'Error exchanging token. Using app token.');
+                                    errorDiv.style.display = 'block';
+                                }
+                                
+                                // Mostrar botão "Criar Canal" mesmo sem business token
+                                const backButton = document.getElementById('backButton');
+                                if (backButton) {
+                                    backButton.textContent = 'Create Channel (with app token)';
+                                    backButton.style.display = 'block';
+                                    backButton.onclick = async function() {
+                                        backButton.disabled = true;
+                                        backButton.textContent = 'Criando canal...';
+                                        
+                                        try {
+                                            const channelResult = await createChannel(waba_id, phone_number_id, null, appData);
+                                            
+                                            if (title) {
+                                                title.innerHTML = '<span class="success-icon">✓</span><br>Canal criado!';
+                                                title.style.color = '#2e7d32';
+                                            }
+                                            if (message) {
+                                                message.textContent = 'Canal criado com sucesso! Redirecionando...';
+                                                message.style.color = '#2e7d32';
+                                            }
+                                            
+                                            setTimeout(function() {
+                                                window.location.href = '/#/configuracoes/meta?embeddedSignupSuccess=true&waba_id=' + waba_id + '&phone_number_id=' + phone_number_id;
+                                            }, 2000);
+                                        } catch (error) {
+                                            console.error('Error creating channel:', error);
+                                            if (title) {
+                                                title.textContent = 'Error';
+                                                title.style.color = '#d32f2f';
+                                            }
+                                            if (message) {
+                                                message.textContent = 'Error: ' + (error.message || 'Unknown error');
+                                                message.style.color = '#d32f2f';
+                                            }
+                                            
+                                            backButton.disabled = false;
+                                            backButton.textContent = 'Back to Settings';
+                                            backButton.onclick = function() {
+                                                window.location.href = '/#/configuracoes/meta?embeddedSignupError=' + encodeURIComponent(error.message || 'Error creating channel');
+                                            };
+                                        }
+                                    };
+                                }
+                            }
+                        } else {
+                            // Outros eventos (CANCEL, ERROR) - mostrar mensagem e botão
+                            const spinner = document.getElementById('spinner');
+                            if (spinner) spinner.style.display = 'none';
+                            
+                            const title = document.getElementById('title');
+                            const message = document.getElementById('message');
+                            
+                            if (embeddedSignupData && embeddedSignupData.event === 'CANCEL') {
+                                if (title) {
+                                    title.textContent = 'Cancelled';
+                                    title.style.color = '#f57c00';
+                                }
+                                if (message) {
+                                    message.textContent = 'The embedded signup was cancelled.';
+                                    message.style.color = '#f57c00';
+                                }
+                            } else if (embeddedSignupData && embeddedSignupData.event === 'ERROR') {
+                                if (title) {
+                                    title.textContent = 'Error';
+                                    title.style.color = '#d32f2f';
+                                }
+                                if (message) {
+                                    message.textContent = embeddedSignupData.error_message || 'An error occurred in the embedded signup.';
+                                    message.style.color = '#d32f2f';
+                                }
+                                
+                                const errorDiv = document.getElementById('error');
+                                if (errorDiv && embeddedSignupData.error_message) {
+                                    errorDiv.textContent = 'Error: ' + embeddedSignupData.error_message;
+                                    errorDiv.style.display = 'block';
+                                }
+                            }
+                            
+                            const backButton = document.getElementById('backButton');
+                            if (backButton) {
+                                backButton.style.display = 'block';
+                                backButton.textContent = 'Back to Settings';
+                                backButton.onclick = function() {
+                                    const params = new URLSearchParams();
+                                    params.set('code', authCode);
+                                    if (embeddedSignupData && embeddedSignupData.event) {
+                                        params.set('embedded_signup_event', embeddedSignupData.event);
+                                    }
+                                    if (embeddedSignupData && embeddedSignupData.error_message) {
+                                        params.set('error', embeddedSignupData.error_message);
+                                    }
+                                    window.location.href = '/#/configuracoes/meta?' + params.toString();
+                                };
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Erro ao processar Embedded Signup:', error);
+                        
+                        // Mostrar erro mas permitir voltar
+                        const spinner = document.getElementById('spinner');
+                        if (spinner) spinner.style.display = 'none';
+                        
+                        const title = document.getElementById('title');
+                        if (title) {
+                            title.textContent = 'Error';
+                            title.style.color = '#d32f2f';
+                        }
+                        
+                        const message = document.getElementById('message');
+                        if (message) {
+                            message.textContent = 'An error occurred while processing the embedded signup.';
+                            message.style.color = '#d32f2f';
+                        }
+                        
+                        const errorDiv = document.getElementById('error');
+                        if (errorDiv) {
+                            errorDiv.textContent = 'Error: ' + (error.message || 'Unknown error');
+                            errorDiv.style.display = 'block';
+                        }
+                        
+                        const backButton = document.getElementById('backButton');
+                        if (backButton) {
+                            backButton.style.display = 'block';
+                            backButton.textContent = 'Back to Settings';
+                            backButton.onclick = function() {
+                                window.location.href = '/#/configuracoes/meta?error=' + encodeURIComponent(error.message || 'Error processing embedded signup');
+                            };
+                        }
+                    }
+                }
+                
+
+            // Se houver código OAuth, aguardar o postMessage com os dados do Embedded Signup
+            // e processar a troca do token e criação do canal diretamente aqui
+            if (authCode) {
+                console.log('=== CÓDIGO OAuth DETECTADO NA URL ===');
+                console.log('Código OAuth recebido:', authCode.substring(0, 50) + '...');
+                console.log('Aguardando dados do Embedded Signup via postMessage...');
+                console.log('PostMessage já recebido?', postMessageReceived);
+                console.log('PostMessage data:', postMessageData);
+                console.log('=====================================');
+                
+                // Atualizar mensagem na tela
+                const container = document.querySelector('.container');
+                const title = document.getElementById('title');
+                const message = document.getElementById('message');
+                if (title) {
+                    title.textContent = 'Code received!';
+                    title.style.color = '#1877f2';
+                }
+                if (message) {
+                    message.textContent = 'Waiting for embedded signup completion. Please wait...';
+                }
+                
+                // Resetar flag se necessário (caso a página seja recarregada)
+                hasProcessed = false;
+                
+                console.log('IMPORTANTE: A página NÃO redirecionará automaticamente.');
+                console.log('Aguardando postMessage do Facebook com waba_id e phone_number_id...');
+
+                // Configurar callback para processar postMessage quando código estiver disponível
+                processEmbeddedSignupCallback = function(data) {
+                    if (hasProcessed) {
+                        console.log('Já processado, ignorando postMessage');
+                        return;
+                    }
+                    
+                    console.log('Processando postMessage do Embedded Signup via callback:', data);
+                    
+                    // Passar o objeto completo do postMessage para processEmbeddedSignup
+                    // A função processEmbeddedSignup já sabe como extrair os dados de data.data
+                    processEmbeddedSignup(data);
+                };
+                
+                // Se o postMessage já foi recebido antes de configurar o callback, processar imediatamente
+                if (postMessageReceived && postMessageData) {
+                    console.log('PostMessage já estava disponível, processando imediatamente...');
+                    setTimeout(function() {
+                        if (!hasProcessed && processEmbeddedSignupCallback) {
+                            processEmbeddedSignupCallback(postMessageData);
+                        }
+                    }, 100);
+                }
+                
+                // Verificar periodicamente se chegou um novo postMessage (fallback)
+                const checkPostMessageInterval = setInterval(function() {
+                    if (postMessageReceived && postMessageData && !hasProcessed && processEmbeddedSignupCallback) {
+                        console.log('PostMessage detectado via polling, processando...');
+                        clearInterval(checkPostMessageInterval);
+                        processEmbeddedSignupCallback(postMessageData);
+                    }
+                }, 500); // Verificar a cada 500ms
+                
+                // Limpar intervalo após 30 segundos
+                setTimeout(function() {
+                    clearInterval(checkPostMessageInterval);
+                }, 30000);
+                
+                // Timeout: se não receber postMessage em 30 segundos, mostrar botão para voltar
+                setTimeout(function() {
+                    if (!hasProcessed) {
+                        console.warn('Timeout aguardando postMessage');
+                        
+                        const spinner = document.getElementById('spinner');
+                        if (spinner) spinner.style.display = 'none';
+                        
+                        const title = document.getElementById('title');
+                        if (title) {
+                            title.textContent = 'Timeout';
+                            title.style.color = '#f57c00';
+                        }
+                        
+                        const message = document.getElementById('message');
+                        if (message) {
+                            message.textContent = 'Não foi possível receber os dados do cadastro incorporado. Você pode tentar novamente ou verificar os logs no console.';
+                            message.style.color = '#f57c00';
+                        }
+                        
+                        const backButton = document.getElementById('backButton');
+                        if (backButton) {
+                            backButton.style.display = 'block';
+                            backButton.textContent = 'Back to Settings';
+                            backButton.onclick = function() {
+                                const params = new URLSearchParams();
+                                params.set('code', authCode);
+                                window.location.href = '/#/configuracoes/meta?' + params.toString();
+                            };
+                        }
+                    }
+                }, 30000); // 30 segundos
+                
+                return;
+            }
+
+            // Se houver erro, redirecionar com erro
+            if (authError) {
+                console.error('Erro na autorização do Facebook:', authError, error_description);
+                const errorMsg = error_description || authError || 'Unknown authorization error';
+                window.location.href = '/#/configuracoes/meta?error=' + encodeURIComponent(errorMsg);
+                return;
+            }
+
+            // Se não houver código nem erro, iniciar o fluxo de login
+            // Verificar se os parâmetros necessários estão presentes
+            if (!appId || !configId) {
+                const errorDiv = document.getElementById('error');
+                errorDiv.style.display = 'block';
+                errorDiv.textContent = 'Parâmetros inválidos. Por favor, inicie o fluxo a partir da página de configurações.';
+                console.error('Parâmetros faltando: appId =', appId, ', configId =', configId);
+                setTimeout(() => {
+                    window.location.href = '/#/configuracoes/meta?error=missing_params';
+                }, 3000);
+                return;
+            }
+
+            console.log('=== INICIANDO FLUXO DE EMBEDDED SIGNUP ===');
+            console.log('App ID:', appId);
+            console.log('API Version:', apiVersion);
+            console.log('Config ID:', configId);
+            console.log('URL atual (será usada como fallback_redirect_uri):', window.location.href);
+
+            // Carregar SDK do Facebook
+            (function(d, s, id) {
+                var js, fjs = d.getElementsByTagName(s)[0];
+                if (d.getElementById(id)) return;
+                js = d.createElement(s); js.id = id;
+                js.src = "https://connect.facebook.net/" + apiVersion + "/sdk.js";
+                js.async = true;
+                fjs.parentNode.insertBefore(js, fjs);
+            }(document, 'script', 'facebook-jssdk'));
+
+            // Inicializar SDK e iniciar login
+            window.fbAsyncInit = function() {
+                try {
+                    window.FB.init({
+                        appId: appId,
+                        cookie: true,
+                        xfbml: true,
+                        version: apiVersion
+                    });
+
+                    console.log('SDK do Facebook inicializado com sucesso');
+
+                    // Aguardar um pouco para garantir que o SDK está totalmente pronto
+                    setTimeout(function() {
+                        try {
+                            // Verificar se o FB está realmente disponível
+                            if (!window.FB) {
+                                throw new Error('FB não está disponível após inicialização');
+                            }
+
+                            // Verificar status de login atual (pode ajudar a diagnosticar problemas)
+                            console.log('Verificando status de login atual...');
+                            window.FB.getLoginStatus(function(statusResponse) {
+                                console.log('Status de login atual:', JSON.stringify(statusResponse, null, 2));
+                            });
+
+                            // Construir URL do OAuth manualmente para ter controle total sobre os parâmetros
+                            const redirectUri = window.location.origin + '/facebook-embedded-signup.html';
+                            fallbackRedirectUri = redirectUri; // Armazenar para usar na troca do código
+                            
+                            // Construir URL do OAuth dialog com parâmetros limpos
+                            const oauthUrl = new URL(`https://www.facebook.com/${apiVersion}/dialog/oauth`);
+                            
+                            // Parâmetros essenciais
+                            oauthUrl.searchParams.set('display', 'popup');
+                            oauthUrl.searchParams.set('client_id', appId);
+                            oauthUrl.searchParams.set('redirect_uri', redirectUri);
+                            oauthUrl.searchParams.set('config_id', configId);
+                            oauthUrl.searchParams.set('response_type', 'code');
+                            oauthUrl.searchParams.set('auth_type', ''); // Parâmetro vazio como no exemplo
+                            oauthUrl.searchParams.set('fallback_redirect_uri', redirectUri);
+                            oauthUrl.searchParams.set('override_default_response_type', 'true');
+                            
+                            // Extras completos conforme documentação do Facebook
+                            const extras = {
+                                sessionInfoVersion: '3',
+                                version: 'v3',
+                                redirect_uri: redirectUri,
+                                featureType: 'whatsapp_business_app_onboarding',
+                                partner_data: 'null',
+                                is_hosted_es: true
+                            };
+                            oauthUrl.searchParams.set('extras', JSON.stringify(extras));
+                            
+                            // Adicionar scope
+                            const scope = 'whatsapp_business_management,whatsapp_business_messaging,business_management,whatsapp_business_manage_events';
+                            oauthUrl.searchParams.set('scope', scope);
+                            
+                            // Gerar state único (usando timestamp + random)
+                            const state = Date.now().toString(36) + Math.random().toString(36).substring(2, 15);
+                            oauthUrl.searchParams.set('state', state);
+                            
+                            const oauthUrlString = oauthUrl.toString();
+                            
+                            console.log('=== URL DO OAUTH DIALOG CONSTRUÍDA ===');
+                            console.log('URL:', oauthUrlString);
+                            console.log('Redirect URI:', redirectUri);
+                            console.log('Fallback Redirect URI:', fallbackRedirectUri);
+                            console.log('========================================');
+                            
+                            // Abrir popup manualmente
+                            const popup = window.open(
+                                oauthUrlString,
+                                'facebook-oauth',
+                                'width=600,height=700,scrollbars=yes,resizable=yes'
+                            );
+                            
+                            if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+                                console.error('Popup bloqueado pelo navegador!');
+                                const errorDiv = document.getElementById('error');
+                                errorDiv.style.display = 'block';
+                                errorDiv.textContent = 'Popup bloqueado pelo navegador. Por favor, permita popups para este site.';
+                                setTimeout(function() {
+                                    window.location.href = '/#/configuracoes/meta?error=popup_blocked';
+                                }, 3000);
+                                return;
+                            }
+                            
+                            console.log('Popup aberto com sucesso');
+                            
+                            // Monitorar o popup para detectar quando ele redireciona para nossa URL
+                            const checkPopupInterval = setInterval(function() {
+                                try {
+                                    // Verificar se o popup foi fechado
+                                    if (popup.closed) {
+                                        clearInterval(checkPopupInterval);
+                                        console.log('Popup foi fechado pelo usuário');
+                                        
+                                        // Verificar se já temos código (pode ter sido capturado via postMessage)
+                                        if (!oauthCodeFromCallback && !authCode) {
+                                            const errorDiv = document.getElementById('error');
+                                            errorDiv.style.display = 'block';
+                                            errorDiv.textContent = 'Autorização cancelada ou popup fechado.';
+                                            
+                                            setTimeout(function() {
+                                                window.location.href = '/#/configuracoes/meta?error=popup_closed';
+                                            }, 2000);
+                                        }
+                                        return;
+                                    }
+                                    
+                                    // Tentar acessar a URL do popup (pode gerar erro de CORS, mas tentamos)
+                                    try {
+                                        const popupUrl = popup.location.href;
+                                        
+                                        // Se o popup redirecionou para nossa URL, capturar o código
+                                        if (popupUrl.includes(window.location.origin) && popupUrl.includes('facebook-embedded-signup.html')) {
+                                            clearInterval(checkPopupInterval);
+                                            
+                                            const popupUrlObj = new URL(popupUrl);
+                                            const code = popupUrlObj.searchParams.get('code');
+                                            
+                                            if (code) {
+                                                console.log('Código OAuth capturado do popup:', code.substring(0, 50) + '...');
+                                                oauthCodeFromCallback = code;
+                                                
+                                                // Fechar popup
+                                                popup.close();
+                                                
+                                                // Atualizar mensagem na tela
+                                                const title = document.getElementById('title');
+                                                const message = document.getElementById('message');
+                                                if (title) title.textContent = 'Código recebido!';
+                                                if (message) message.textContent = 'Aguardando conclusão do cadastro incorporado...';
+                                                
+                                                // Se o postMessage já foi recebido, processar imediatamente
+                                                if (postMessageReceived && postMessageData) {
+                                                    console.log('=== POSTMESSAGE JÁ RECEBIDO, PROCESSANDO COM CÓDIGO DO POPUP ===');
+                                                    console.log('PostMessage data:', postMessageData);
+                                                    console.log('Código OAuth disponível:', !!oauthCodeFromCallback);
+                                                    
+                                                    // Configurar callback se ainda não estiver configurado
+                                                    if (!processEmbeddedSignupCallback) {
+                                                        console.log('Configurando callback do processEmbeddedSignup...');
+                                                        processEmbeddedSignupCallback = function(data) {
+                                                            if (hasProcessed) {
+                                                                console.log('Já processado, ignorando postMessage');
+                                                                return;
+                                                            }
+                                                            console.log('Processando postMessage do Embedded Signup via callback:', data);
+                                                            processEmbeddedSignup(data);
+                                                        };
+                                                    }
+                                                    
+                                                    // Processar após um pequeno delay para garantir que tudo está pronto
+                                                    setTimeout(function() {
+                                                        console.log('Chamando processEmbeddedSignupCallback agora...');
+                                                        if (processEmbeddedSignupCallback && !hasProcessed) {
+                                                            processEmbeddedSignupCallback(postMessageData);
+                                                        } else {
+                                                            console.warn('Callback não disponível ou já processado. hasProcessed:', hasProcessed);
+                                                        }
+                                                    }, 500);
+                                                } else {
+                                                    console.log('Aguardando postMessage do Embedded Signup para processar...');
+                                                    console.log('postMessageReceived:', postMessageReceived);
+                                                    console.log('postMessageData:', postMessageData);
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // Erro de CORS ao acessar popup.location - normal, continuar monitorando
+                                        // O código será capturado quando o popup redirecionar para nossa página
+                                    }
+                                } catch (e) {
+                                    // Erro ao verificar popup - continuar tentando
+                                }
+                            }, 500); // Verificar a cada 500ms
+                            
+                            // Limpar intervalo após 5 minutos (timeout)
+                            setTimeout(function() {
+                                clearInterval(checkPopupInterval);
+                                if (!popup.closed) {
+                                    popup.close();
+                                }
+                            }, 300000); // 5 minutos
+                        } catch (error) {
+                            console.error('Erro ao chamar FB.login():', error);
+                            const errorDiv = document.getElementById('error');
+                            errorDiv.style.display = 'block';
+                            errorDiv.textContent = 'Erro ao iniciar login: ' + error.message;
+                            setTimeout(function() {
+                                window.location.href = '/#/configuracoes/meta?error=' + encodeURIComponent(error.message);
+                            }, 3000);
+                        }
+                    }, 500); // Aguardar 500ms após inicialização do SDK
+                } catch (error) {
+                    console.error('Erro ao inicializar SDK:', error);
+                    const errorDiv = document.getElementById('error');
+                    errorDiv.style.display = 'block';
+                    errorDiv.textContent = 'Erro ao inicializar o Facebook SDK: ' + error.message;
+                    setTimeout(function() {
+                        window.location.href = '/#/configuracoes/meta?error=' + encodeURIComponent(error.message);
+                    }, 3000);
+                }
+            };
+        })();
+    </script>
+</body>
+</html>
